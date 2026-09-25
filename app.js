@@ -1,5 +1,8 @@
-// 📌 유저 검증 기반 최적 임계값: 80% (0.80)
-const MATCH_THRESHOLD = 0.80;
+// 📌 최적 임계값: 기본 80% (0.80)
+const MATCH_THRESHOLD = 0.79;
+
+// 🎯 연산 속도를 보장하는 핵심 GUI 스케일 비율 (5단계)
+const SCALES = [0.7, 0.85, 1.0, 1.15, 1.3];
 
 let isOpenCvReady = false;
 let isStreaming = false;
@@ -15,19 +18,16 @@ const pinTemplates = {};
 const TOTAL_PINS = 6;
 let loadedTemplatesCount = 0;
 
-// 🧠 [신규] 핀 위치 누적 기억 및 타임아웃 상태 변수
-let accumulatedPins = {};          // 감지된 핀 정보 저장 ({ 1: {...}, 2: {...} })
-let lastPinDetectedTimestamp = null; // 마지막 핀 감지 시각
-let isLocked = false;                // 1.5초 지남에 따른 감지 잠금 여부
+let accumulatedPins = {};          // 감지된 핀 누적 저장
+let lastPinDetectedTimestamp = null; // 마지막 감지 시각
+let isLocked = false;                // 1.5초 타임아웃 감지 고정 여부
 
-// OpenCV 엔진 로딩 완벽 완료 시 호출
 function onOpenCvReady() {
     isOpenCvReady = true;
-    statusText.innerText = "엔진 준비 완료! 핀 이미지를 로딩 중입니다...";
+    statusText.innerText = "엔진 준비 완료! 다중 GUI 대응 핀을 로딩 중입니다...";
     loadPinTemplates();
 }
 
-// 핀 이미지(pin1.png ~ pin6.png) 안전 로드
 function loadPinTemplates() {
     for (let i = 1; i <= TOTAL_PINS; i++) {
         const img = new Image();
@@ -44,31 +44,45 @@ function loadPinTemplates() {
                 const grayMat = new cv.Mat();
                 cv.cvtColor(mat, grayMat, cv.COLOR_RGBA2GRAY);
 
-                pinTemplates[`pin${i}`] = {
-                    mat: grayMat,
-                    width: img.width,
-                    height: img.height
-                };
+                pinTemplates[`pin${i}`] = [];
+
+                SCALES.forEach(scale => {
+                    let targetW = Math.round(img.width * scale);
+                    let targetH = Math.round(img.height * scale);
+
+                    if (targetW > 5 && targetH > 5) {
+                        let resizedMat = new cv.Mat();
+                        let dsize = new cv.Size(targetW, targetH);
+                        cv.resize(grayMat, resizedMat, dsize, 0, 0, cv.INTER_LINEAR);
+
+                        pinTemplates[`pin${i}`].push({
+                            mat: resizedMat,
+                            scale: scale,
+                            width: targetW,
+                            height: targetH
+                        });
+                    }
+                });
+
                 mat.delete();
+                grayMat.delete();
 
                 loadedTemplatesCount++;
                 if (loadedTemplatesCount === TOTAL_PINS) {
-                    statusText.innerText = "🟢 모든 준비 완료! [화면 공유 시작] 버튼을 누르세요.";
+                    statusText.innerText = "🟢 준비 완료! [화면 공유 시작]을 누르세요.";
                     startBtn.disabled = false;
                     startBtn.innerText = "🖥️ 화면 공유 시작";
                 }
             } catch (err) {
                 console.error(`pin${i}.png 변환 실패:`, err);
-                statusText.innerText = `⚠️ pin${i}.png 이미지 처리 중 오류 발생`;
             }
         };
         img.onerror = () => {
-            statusText.innerText = `⚠️ pin${i}.png 파일이 없습니다. 저장소 디렉토리를 확인하세요.`;
+            statusText.innerText = `⚠️ pin${i}.png 파일이 없습니다.`;
         };
     }
 }
 
-// 화면 공유 시작
 startBtn.addEventListener('click', async () => {
     try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -90,18 +104,16 @@ startBtn.addEventListener('click', async () => {
         });
 
     } catch (err) {
-        console.error("화면 공유 실패:", err);
         statusText.innerText = "❌ 화면 공유가 취소되었거나 오류가 발생했습니다.";
     }
 });
 
-// 실시간 프레임 처리 및 누적 감지 로직
 function processFrame() {
     if (!isStreaming) return;
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // 🔒 1.5초 초과로 감지가 잠긴 상태인 경우: 화면에 결과만 고정 표시
+    // 감지 완료 시 결과 고정 시각화
     if (isLocked) {
         drawDetections(Object.values(accumulatedPins));
         requestAnimationFrame(processFrame);
@@ -112,47 +124,59 @@ function processFrame() {
     let srcGray = new cv.Mat();
     cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
 
-    // 1번부터 6번 핀 중 아직 기억되지 않은 핀만 탐색
+    // ⚡ 연산 최적화: 아직 못 찾은 '다음 번호 핀'을 우선적으로 집중 탐색
     for (let i = 1; i <= TOTAL_PINS; i++) {
-        if (accumulatedPins[i]) continue; // 이미 잡은 핀은 재검사 생략 (기억 유지)
+        if (accumulatedPins[i]) continue;
 
-        const templateInfo = pinTemplates[`pin${i}`];
-        if (!templateInfo) continue;
+        const scaledTemplates = pinTemplates[`pin${i}`];
+        if (!scaledTemplates) continue;
 
-        let result = new cv.Mat();
-        cv.matchTemplate(srcGray, templateInfo.mat, result, cv.TM_CCOEFF_NORMED);
+        let bestMatchForThisPin = null;
 
-        let minMax = cv.minMaxLoc(result);
-        let maxVal = minMax.maxVal;
-        let maxLoc = minMax.maxLoc;
+        for (let templateInfo of scaledTemplates) {
+            if (srcGray.cols < templateInfo.width || srcGray.rows < templateInfo.height) continue;
 
-        // 80% 이상 일치 시 핀 정보 메모리에 누적 저장
-        if (maxVal >= MATCH_THRESHOLD) {
-            accumulatedPins[i] = {
-                num: i,
-                x: maxLoc.x + templateInfo.width / 2,
-                y: maxLoc.y + templateInfo.height / 2,
-                boxX: maxLoc.x,
-                boxY: maxLoc.y,
-                width: templateInfo.width,
-                height: templateInfo.height,
-                score: (maxVal * 100).toFixed(0)
-            };
-            // 핀이 추가될 때마다 타이머 갱신
+            let result = new cv.Mat();
+            cv.matchTemplate(srcGray, templateInfo.mat, result, cv.TM_CCOEFF_NORMED);
+
+            let minMax = cv.minMaxLoc(result);
+            let maxVal = minMax.maxVal;
+            let maxLoc = minMax.maxLoc;
+
+            // 💡 리사이즈 오차 감안하여 78% 이상부터 정밀 채택
+            if (maxVal >= 0.78) {
+                if (!bestMatchForThisPin || maxVal > bestMatchForThisPin.scoreVal) {
+                    bestMatchForThisPin = {
+                        num: i,
+                        x: maxLoc.x + templateInfo.width / 2,
+                        y: maxLoc.y + templateInfo.height / 2,
+                        score: (maxVal * 100).toFixed(0),
+                        scoreVal: maxVal
+                    };
+                }
+            }
+            result.delete();
+        }
+
+        if (bestMatchForThisPin) {
+            accumulatedPins[i] = bestMatchForThisPin;
             lastPinDetectedTimestamp = Date.now();
         }
-        result.delete();
+
+        // 연속 탐지 시 한 프레임당 1~2개 단위로 효율적 탐색 (렉 방지)
+        if (bestMatchForThisPin && i < TOTAL_PINS) {
+            break;
+        }
     }
 
-    // ⏱️ 1.5초 타임아웃 검사: 마지막 핀 감지 후 1.5초 동안 새 핀이 없으면 고정
+    // ⏱️ 1.5초 동안 새 핀 감지 없으면 고정
     if (Object.keys(accumulatedPins).length > 0 && lastPinDetectedTimestamp) {
         if (Date.now() - lastPinDetectedTimestamp >= 1500) {
             isLocked = true;
-            statusText.innerText = `🔒 감지 완료 (${Object.keys(accumulatedPins).length}개 핀 연결 고정). 제련 후 초기화(Space/R)를 누르세요.`;
+            statusText.innerText = `🔒 연결 완료 (${Object.keys(accumulatedPins).length}개). 완료 후 초기화(Space/R)를 누르세요.`;
         }
     }
 
-    // 누적된 모든 핀 및 연결선 그리기
     drawDetections(Object.values(accumulatedPins));
 
     src.delete();
@@ -161,38 +185,47 @@ function processFrame() {
     requestAnimationFrame(processFrame);
 }
 
-// 누적된 핀 화면에 표시 및 순서 선 연결
+// 🎨 깔끔한 원형 배지 및 연결선 시각화 (네모 박스 완전 제거)
 function drawDetections(pins) {
     if (pins.length === 0) return;
 
-    // 번호 순서대로 정렬 (1 -> 2 -> 3...)
     pins.sort((a, b) => a.num - b.num);
 
-    // 1. 핀 간 연결선 그리기 (밝은 녹색 가이드 라인)
+    // 1. 선명한 가이드 선 그리기
     if (pins.length > 1) {
         ctx.beginPath();
         ctx.moveTo(pins[0].x, pins[0].y);
         for (let i = 1; i < pins.length; i++) {
             ctx.lineTo(pins[i].x, pins[i].y);
         }
-        ctx.strokeStyle = "#00FF00";
-        ctx.lineWidth = 4;
+        ctx.strokeStyle = "#00FF66";
+        ctx.lineWidth = 5;
+        ctx.lineJoin = "round";
         ctx.stroke();
     }
 
-    // 2. 각 핀 박스 및 번호 표시
+    // 2. 각 핀 중앙에 동그란 숫자 배지 그리기
     pins.forEach((pin) => {
-        ctx.strokeStyle = "#00FF00";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(pin.boxX, pin.boxY, pin.width, pin.height);
+        const radius = 16;
 
-        ctx.fillStyle = "#00FF00";
-        ctx.font = "bold 16px Arial";
-        ctx.fillText(`P${pin.num} (${pin.score}%)`, pin.boxX, Math.max(pin.boxY - 6, 20));
+        // 원형 테두리 및 배경
+        ctx.beginPath();
+        ctx.arc(pin.x, pin.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = "#00E676"; // 시독성 높은 네온 그린
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#000000"; // 검은색 겉 테두리
+        ctx.stroke();
+
+        // 번호 텍스트 (원 중앙 정렬)
+        ctx.fillStyle = "#000000";
+        ctx.font = "bold 18px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(pin.num, pin.x, pin.y);
     });
 }
 
-// 초기화 함수 (새 제련 시작 시)
 function resetState() {
     accumulatedPins = {};
     lastPinDetectedTimestamp = null;

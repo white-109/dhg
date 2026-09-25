@@ -1,7 +1,7 @@
-// 📌 최적 임계값: 기본 80% (0.80)
-const MATCH_THRESHOLD = 0.79;
+// 📌 최적 임계값: 78% (0.78)
+const MATCH_THRESHOLD = 0.78;
 
-// 🎯 연산 속도를 보장하는 핵심 GUI 스케일 비율 (5단계)
+// 🎯 핵심 GUI 스케일 비율 (5단계)
 const SCALES = [0.7, 0.85, 1.0, 1.15, 1.3];
 
 let isOpenCvReady = false;
@@ -86,7 +86,7 @@ function loadPinTemplates() {
 startBtn.addEventListener('click', async () => {
     try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
-            video: { frameRate: { ideal: 30, max: 60 } },
+            video: { frameRate: { ideal: 60, max: 60 } },
             audio: false
         });
 
@@ -113,7 +113,7 @@ function processFrame() {
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // 감지 완료 시 결과 고정 시각화
+    // 감지 완료 시 고정 시각화 출력 유지
     if (isLocked) {
         drawDetections(Object.values(accumulatedPins));
         requestAnimationFrame(processFrame);
@@ -124,9 +124,18 @@ function processFrame() {
     let srcGray = new cv.Mat();
     cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
 
-    // ⚡ 연산 최적화: 아직 못 찾은 '다음 번호 핀'을 우선적으로 집중 탐색
+    // 🎯 [개선] 넉넉한 중앙 영역(ROI) 크롭 연산 (가로 70%, 세로 75%)
+    const cropW = Math.min(srcGray.cols, Math.round(srcGray.cols * 0.70));
+    const cropH = Math.min(srcGray.rows, Math.round(srcGray.rows * 0.75));
+    const cropX = Math.max(0, Math.round((srcGray.cols - cropW) / 2));
+    const cropY = Math.max(0, Math.round((srcGray.rows - cropH) / 2));
+
+    let rect = new cv.Rect(cropX, cropY, cropW, cropH);
+    let roiGray = srcGray.roi(rect);
+
+    // 1번부터 6번까지 지연 없이 한 프레임에 전부 연쇄 탐색
     for (let i = 1; i <= TOTAL_PINS; i++) {
-        if (accumulatedPins[i]) continue;
+        if (accumulatedPins[i]) continue; // 이미 찾아낸 핀은 통과
 
         const scaledTemplates = pinTemplates[`pin${i}`];
         if (!scaledTemplates) continue;
@@ -134,22 +143,22 @@ function processFrame() {
         let bestMatchForThisPin = null;
 
         for (let templateInfo of scaledTemplates) {
-            if (srcGray.cols < templateInfo.width || srcGray.rows < templateInfo.height) continue;
+            if (roiGray.cols < templateInfo.width || roiGray.rows < templateInfo.height) continue;
 
             let result = new cv.Mat();
-            cv.matchTemplate(srcGray, templateInfo.mat, result, cv.TM_CCOEFF_NORMED);
+            cv.matchTemplate(roiGray, templateInfo.mat, result, cv.TM_CCOEFF_NORMED);
 
             let minMax = cv.minMaxLoc(result);
             let maxVal = minMax.maxVal;
             let maxLoc = minMax.maxLoc;
 
-            // 💡 리사이즈 오차 감안하여 78% 이상부터 정밀 채택
-            if (maxVal >= 0.78) {
+            if (maxVal >= MATCH_THRESHOLD) {
                 if (!bestMatchForThisPin || maxVal > bestMatchForThisPin.scoreVal) {
                     bestMatchForThisPin = {
                         num: i,
-                        x: maxLoc.x + templateInfo.width / 2,
-                        y: maxLoc.y + templateInfo.height / 2,
+                        // 잘라낸 크롭 좌표(cropX, cropY)를 더해 원본 위치 정확히 복원
+                        x: cropX + maxLoc.x + templateInfo.width / 2,
+                        y: cropY + maxLoc.y + templateInfo.height / 2,
                         score: (maxVal * 100).toFixed(0),
                         scoreVal: maxVal
                     };
@@ -162,36 +171,33 @@ function processFrame() {
             accumulatedPins[i] = bestMatchForThisPin;
             lastPinDetectedTimestamp = Date.now();
         }
-
-        // 연속 탐지 시 한 프레임당 1~2개 단위로 효율적 탐색 (렉 방지)
-        if (bestMatchForThisPin && i < TOTAL_PINS) {
-            break;
-        }
+        // ⚡ break 제한 구문을 완전 삭제하여 한 프레임 안에서 여러 핀을 즉시 동시 탐색!
     }
 
-    // ⏱️ 1.5초 동안 새 핀 감지 없으면 고정
+    // ⏱️ 1.5초간 새 핀 감지가 없으면 잠금(Lock)
     if (Object.keys(accumulatedPins).length > 0 && lastPinDetectedTimestamp) {
-        if (Date.now() - lastPinDetectedTimestamp >= 2000) {
+        if (Date.now() - lastPinDetectedTimestamp >= 1500) {
             isLocked = true;
-            statusText.innerText = `🔒 연결 완료 (${Object.keys(accumulatedPins).length}개). 완료 후 초기화(Space/R)를 누르세요.`;
+            statusText.innerText = `🔒 연결 완료 (${Object.keys(accumulatedPins).length}개). 제련 후 초기화(Space/R)를 누르세요.`;
         }
     }
 
     drawDetections(Object.values(accumulatedPins));
 
+    roiGray.delete();
     src.delete();
     srcGray.delete();
 
     requestAnimationFrame(processFrame);
 }
 
-// 🎨 깔끔한 원형 배지 및 연결선 시각화 (네모 박스 완전 제거)
+// 🎨 깔끔한 원형 숫자 배지 및 연두색 연결선 시각화 (초록 네모 박스 제거)
 function drawDetections(pins) {
     if (pins.length === 0) return;
 
     pins.sort((a, b) => a.num - b.num);
 
-    // 1. 선명한 가이드 선 그리기
+    // 1. 순서 가이드 라인
     if (pins.length > 1) {
         ctx.beginPath();
         ctx.moveTo(pins[0].x, pins[0].y);
@@ -204,20 +210,18 @@ function drawDetections(pins) {
         ctx.stroke();
     }
 
-    // 2. 각 핀 중앙에 동그란 숫자 배지 그리기
+    // 2. 핀 중앙에 동그란 번호 배지
     pins.forEach((pin) => {
         const radius = 16;
 
-        // 원형 테두리 및 배경
         ctx.beginPath();
         ctx.arc(pin.x, pin.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = "#00E676"; // 시독성 높은 네온 그린
+        ctx.fillStyle = "#00E676"; // 밝은 연두색
         ctx.fill();
         ctx.lineWidth = 3;
-        ctx.strokeStyle = "#000000"; // 검은색 겉 테두리
+        ctx.strokeStyle = "#000000"; // 검은색 테두리
         ctx.stroke();
 
-        // 번호 텍스트 (원 중앙 정렬)
         ctx.fillStyle = "#000000";
         ctx.font = "bold 18px sans-serif";
         ctx.textAlign = "center";

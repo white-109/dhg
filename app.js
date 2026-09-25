@@ -1,8 +1,8 @@
 // 📌 최적 임계값: 78% (0.78)
 const MATCH_THRESHOLD = 0.78;
 
-// 🎯 핵심 GUI 스케일 비율 (5단계)
-const SCALES = [0.7, 0.85, 1.0, 1.15, 1.3];
+// 🎯 가장 많이 쓰이는 1.0배율을 최우선 배치
+const SCALES = [1.0, 0.85, 1.15, 0.7, 1.3];
 
 let isOpenCvReady = false;
 let isStreaming = false;
@@ -18,13 +18,14 @@ const pinTemplates = {};
 const TOTAL_PINS = 6;
 let loadedTemplatesCount = 0;
 
-let accumulatedPins = {};          // 감지된 핀 누적 저장
-let lastPinDetectedTimestamp = null; // 마지막 감지 시각
-let isLocked = false;                // 1.5초 타임아웃 감지 고정 여부
+let accumulatedPins = {};            // 누적 감지된 핀 저장
+let lastPinDetectedTimestamp = null;   // 마지막 감지 시각
+let isLocked = false;                  // 1.5초 타임아웃 고정 여부
+let lockedScaleIndex = null;           // ⚡ 60 FPS 유지를 위한 스케일 고정 변수
 
 function onOpenCvReady() {
     isOpenCvReady = true;
-    statusText.innerText = "엔진 준비 완료! 다중 GUI 대응 핀을 로딩 중입니다...";
+    statusText.innerText = "엔진 준비 완료! 핀 이미지를 구성 중입니다...";
     loadPinTemplates();
 }
 
@@ -46,7 +47,7 @@ function loadPinTemplates() {
 
                 pinTemplates[`pin${i}`] = [];
 
-                SCALES.forEach(scale => {
+                SCALES.forEach((scale, scaleIdx) => {
                     let targetW = Math.round(img.width * scale);
                     let targetH = Math.round(img.height * scale);
 
@@ -58,6 +59,7 @@ function loadPinTemplates() {
                         pinTemplates[`pin${i}`].push({
                             mat: resizedMat,
                             scale: scale,
+                            scaleIdx: scaleIdx,
                             width: targetW,
                             height: targetH
                         });
@@ -113,7 +115,6 @@ function processFrame() {
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // 감지 완료 시 고정 시각화 출력 유지
     if (isLocked) {
         drawDetections(Object.values(accumulatedPins));
         requestAnimationFrame(processFrame);
@@ -124,25 +125,30 @@ function processFrame() {
     let srcGray = new cv.Mat();
     cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
 
-    // 🎯 [개선] 넉넉한 중앙 영역(ROI) 크롭 연산 (가로 70%, 세로 75%)
-    const cropW = Math.min(srcGray.cols, Math.round(srcGray.cols * 0.70));
-    const cropH = Math.min(srcGray.rows, Math.round(srcGray.rows * 0.75));
+    // ⚡ [최적화] 실제 마크 제련창 영역에 맞춘 중앙 정밀 크롭 (가로 50%, 세로 55%)
+    const cropW = Math.min(srcGray.cols, Math.round(srcGray.cols * 0.50));
+    const cropH = Math.min(srcGray.rows, Math.round(srcGray.rows * 0.55));
     const cropX = Math.max(0, Math.round((srcGray.cols - cropW) / 2));
     const cropY = Math.max(0, Math.round((srcGray.rows - cropH) / 2));
 
     let rect = new cv.Rect(cropX, cropY, cropW, cropH);
     let roiGray = srcGray.roi(rect);
 
-    // 1번부터 6번까지 지연 없이 한 프레임에 전부 연쇄 탐색
     for (let i = 1; i <= TOTAL_PINS; i++) {
-        if (accumulatedPins[i]) continue; // 이미 찾아낸 핀은 통과
+        if (accumulatedPins[i]) continue;
 
         const scaledTemplates = pinTemplates[`pin${i}`];
         if (!scaledTemplates) continue;
 
+        // ⚡ [핵심 60 FPS 로직] 배율이 이미 측정되었으면 해당 배율만 0.001초 탐색
+        const templatesToSearch = (lockedScaleIndex !== null)
+            ? [scaledTemplates.find(t => t.scaleIdx === lockedScaleIndex) || scaledTemplates[0]]
+            : scaledTemplates;
+
         let bestMatchForThisPin = null;
 
-        for (let templateInfo of scaledTemplates) {
+        for (let templateInfo of templatesToSearch) {
+            if (!templateInfo) continue;
             if (roiGray.cols < templateInfo.width || roiGray.rows < templateInfo.height) continue;
 
             let result = new cv.Mat();
@@ -156,11 +162,11 @@ function processFrame() {
                 if (!bestMatchForThisPin || maxVal > bestMatchForThisPin.scoreVal) {
                     bestMatchForThisPin = {
                         num: i,
-                        // 잘라낸 크롭 좌표(cropX, cropY)를 더해 원본 위치 정확히 복원
                         x: cropX + maxLoc.x + templateInfo.width / 2,
                         y: cropY + maxLoc.y + templateInfo.height / 2,
                         score: (maxVal * 100).toFixed(0),
-                        scoreVal: maxVal
+                        scoreVal: maxVal,
+                        scaleIdx: templateInfo.scaleIdx
                     };
                 }
             }
@@ -170,11 +176,15 @@ function processFrame() {
         if (bestMatchForThisPin) {
             accumulatedPins[i] = bestMatchForThisPin;
             lastPinDetectedTimestamp = Date.now();
+
+            // 첫 핀 감지 시 유저의 GUI 배율 고정 (이후 프레임 속도 폭발적 증가)
+            if (lockedScaleIndex === null) {
+                lockedScaleIndex = bestMatchForThisPin.scaleIdx;
+            }
         }
-        // ⚡ break 제한 구문을 완전 삭제하여 한 프레임 안에서 여러 핀을 즉시 동시 탐색!
     }
 
-    // ⏱️ 1.5초간 새 핀 감지가 없으면 잠금(Lock)
+    // ⏱️ 1.5초간 새 핀 미감지 시 잠금
     if (Object.keys(accumulatedPins).length > 0 && lastPinDetectedTimestamp) {
         if (Date.now() - lastPinDetectedTimestamp >= 1500) {
             isLocked = true;
@@ -191,13 +201,11 @@ function processFrame() {
     requestAnimationFrame(processFrame);
 }
 
-// 🎨 깔끔한 원형 숫자 배지 및 연두색 연결선 시각화 (초록 네모 박스 제거)
 function drawDetections(pins) {
     if (pins.length === 0) return;
 
     pins.sort((a, b) => a.num - b.num);
 
-    // 1. 순서 가이드 라인
     if (pins.length > 1) {
         ctx.beginPath();
         ctx.moveTo(pins[0].x, pins[0].y);
@@ -210,16 +218,15 @@ function drawDetections(pins) {
         ctx.stroke();
     }
 
-    // 2. 핀 중앙에 동그란 번호 배지
     pins.forEach((pin) => {
         const radius = 16;
 
         ctx.beginPath();
         ctx.arc(pin.x, pin.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = "#00E676"; // 밝은 연두색
+        ctx.fillStyle = "#00E676";
         ctx.fill();
         ctx.lineWidth = 3;
-        ctx.strokeStyle = "#000000"; // 검은색 테두리
+        ctx.strokeStyle = "#000000";
         ctx.stroke();
 
         ctx.fillStyle = "#000000";
@@ -234,6 +241,7 @@ function resetState() {
     accumulatedPins = {};
     lastPinDetectedTimestamp = null;
     isLocked = false;
+    lockedScaleIndex = null; // 초기화 시 배율 재측정 준비
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (isStreaming) {
         statusText.innerText = "🟢 실시간 감지 중... 마인크래프트 제련창을 열어주세요.";

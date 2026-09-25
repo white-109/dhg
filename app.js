@@ -171,7 +171,7 @@ function processFrame() {
 
     // ⏱️ 1.5초 동안 새 핀 감지 없으면 고정
     if (Object.keys(accumulatedPins).length > 0 && lastPinDetectedTimestamp) {
-        if (Date.now() - lastPinDetectedTimestamp >= 1500) {
+        if (Date.now() - lastPinDetectedTimestamp >= 2000) {
             isLocked = true;
             statusText.innerText = `🔒 연결 완료 (${Object.keys(accumulatedPins).length}개). 완료 후 초기화(Space/R)를 누르세요.`;
         }

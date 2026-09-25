@@ -15,6 +15,11 @@ const pinTemplates = {};
 const TOTAL_PINS = 6;
 let loadedTemplatesCount = 0;
 
+// 🧠 [신규] 핀 위치 누적 기억 및 타임아웃 상태 변수
+let accumulatedPins = {};          // 감지된 핀 정보 저장 ({ 1: {...}, 2: {...} })
+let lastPinDetectedTimestamp = null; // 마지막 핀 감지 시각
+let isLocked = false;                // 1.5초 지남에 따른 감지 잠금 여부
+
 // OpenCV 엔진 로딩 완벽 완료 시 호출
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -29,7 +34,6 @@ function loadPinTemplates() {
         img.src = `pin${i}.png`;
         img.onload = () => {
             try {
-                // 임시 캔버스 제작 후 안전하게 Mat으로 변환 (오류 방지)
                 const tempCanvas = document.createElement('canvas');
                 tempCanvas.width = img.width;
                 tempCanvas.height = img.height;
@@ -91,19 +95,27 @@ startBtn.addEventListener('click', async () => {
     }
 });
 
-// 실시간 80% 매칭 프레임 연산
+// 실시간 프레임 처리 및 누적 감지 로직
 function processFrame() {
     if (!isStreaming) return;
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+    // 🔒 1.5초 초과로 감지가 잠긴 상태인 경우: 화면에 결과만 고정 표시
+    if (isLocked) {
+        drawDetections(Object.values(accumulatedPins));
+        requestAnimationFrame(processFrame);
+        return;
+    }
+
     let src = cv.imread(canvas);
     let srcGray = new cv.Mat();
     cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
 
-    let detectedPins = [];
-
+    // 1번부터 6번 핀 중 아직 기억되지 않은 핀만 탐색
     for (let i = 1; i <= TOTAL_PINS; i++) {
+        if (accumulatedPins[i]) continue; // 이미 잡은 핀은 재검사 생략 (기억 유지)
+
         const templateInfo = pinTemplates[`pin${i}`];
         if (!templateInfo) continue;
 
@@ -114,8 +126,9 @@ function processFrame() {
         let maxVal = minMax.maxVal;
         let maxLoc = minMax.maxLoc;
 
+        // 80% 이상 일치 시 핀 정보 메모리에 누적 저장
         if (maxVal >= MATCH_THRESHOLD) {
-            detectedPins.push({
+            accumulatedPins[i] = {
                 num: i,
                 x: maxLoc.x + templateInfo.width / 2,
                 y: maxLoc.y + templateInfo.height / 2,
@@ -124,12 +137,23 @@ function processFrame() {
                 width: templateInfo.width,
                 height: templateInfo.height,
                 score: (maxVal * 100).toFixed(0)
-            });
+            };
+            // 핀이 추가될 때마다 타이머 갱신
+            lastPinDetectedTimestamp = Date.now();
         }
         result.delete();
     }
 
-    drawDetections(detectedPins);
+    // ⏱️ 1.5초 타임아웃 검사: 마지막 핀 감지 후 1.5초 동안 새 핀이 없으면 고정
+    if (Object.keys(accumulatedPins).length > 0 && lastPinDetectedTimestamp) {
+        if (Date.now() - lastPinDetectedTimestamp >= 1500) {
+            isLocked = true;
+            statusText.innerText = `🔒 감지 완료 (${Object.keys(accumulatedPins).length}개 핀 연결 고정). 제련 후 초기화(Space/R)를 누르세요.`;
+        }
+    }
+
+    // 누적된 모든 핀 및 연결선 그리기
+    drawDetections(Object.values(accumulatedPins));
 
     src.delete();
     srcGray.delete();
@@ -137,9 +161,14 @@ function processFrame() {
     requestAnimationFrame(processFrame);
 }
 
+// 누적된 핀 화면에 표시 및 순서 선 연결
 function drawDetections(pins) {
+    if (pins.length === 0) return;
+
+    // 번호 순서대로 정렬 (1 -> 2 -> 3...)
     pins.sort((a, b) => a.num - b.num);
 
+    // 1. 핀 간 연결선 그리기 (밝은 녹색 가이드 라인)
     if (pins.length > 1) {
         ctx.beginPath();
         ctx.moveTo(pins[0].x, pins[0].y);
@@ -151,6 +180,7 @@ function drawDetections(pins) {
         ctx.stroke();
     }
 
+    // 2. 각 핀 박스 및 번호 표시
     pins.forEach((pin) => {
         ctx.strokeStyle = "#00FF00";
         ctx.lineWidth = 2;
@@ -162,8 +192,15 @@ function drawDetections(pins) {
     });
 }
 
+// 초기화 함수 (새 제련 시작 시)
 function resetState() {
+    accumulatedPins = {};
+    lastPinDetectedTimestamp = null;
+    isLocked = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (isStreaming) {
+        statusText.innerText = "🟢 실시간 감지 중... 마인크래프트 제련창을 열어주세요.";
+    }
 }
 
 resetBtn.addEventListener('click', resetState);

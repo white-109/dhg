@@ -36,7 +36,11 @@
             transition: 0.2s;
             margin: 5px;
         }
-        .btn:hover { background-color: #45a049; }
+        .btn:disabled {
+            background-color: #555555;
+            cursor: not-allowed;
+        }
+        .btn:hover:not(:disabled) { background-color: #45a049; }
         .btn-reset { background-color: #f44336; }
         .btn-reset:hover { background-color: #da190b; }
 
@@ -57,8 +61,6 @@
             color: #aaa;
         }
     </style>
-    <!-- OpenCV.js 실시간 템플릿 매칭 엔진 로드 -->
-    <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady();"></script>
 </head>
 <body>
 
@@ -66,17 +68,28 @@
     
     <div class="info-panel">
         <p style="margin: 0 0 10px 0;">순서: <b>1. 화면 공유 ➔ 2. 마인크래프트 창 선택 ➔ 3. 제련후 따라하기</b></p>
-        <button id="startBtn" class="btn" disabled>엔진 로딩 중</button>
+        <button id="startBtn" class="btn" disabled>엔진 로딩 중...</button>
         <button id="resetBtn" class="btn btn-reset">초기화 (Space / R)</button>
     </div>
 
-    <div class="status-text" id="status">OpenCV.js 비전 라이브러리를 불러오는 중</div>
+    <div class="status-text" id="status">OpenCV.js 연산 엔진을 초기화하는 중입니다...</div>
 
     <div class="canvas-container">
         <video id="webcamVideo" autoplay playsinline></video>
         <canvas id="outputCanvas"></canvas>
     </div>
 
+    <!-- OpenCV WASM 엔진 로딩 보장 스크립트 -->
+    <script>
+        var Module = {
+            onRuntimeInitialized: function() {
+                if (typeof onOpenCvReady === 'function') {
+                    onOpenCvReady();
+                }
+            }
+        };
+    </script>
+    <script async src="https://docs.opencv.org/4.7.0/opencv.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

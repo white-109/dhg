@@ -8,8 +8,7 @@ const video = document.getElementById('webcamVideo');
 const canvas = document.getElementById('outputCanvas');
 const ctx = canvas.getContext('2d');
 
-// 🎯 영역 지정 및 캡처 관련 변수
-let roi = null;              // 유저가 드래그로 지정한 영역 { x, y, w, h }
+let roi = null;
 let isDragging = false;
 let startX = 0, startY = 0;
 let currentX = 0, currentY = 0;
@@ -21,9 +20,10 @@ let cellPersistence = {};
 let pinSequence = [];
 let lastPinTimestamp = null;
 let isLocked = false;
+let isAnvilClosedState = false; // 🔄 모루가 닫혔었는지 추적하는 플래그
 
 const TOTAL_PINS = 6;
-const PERSISTENCE_FRAMES = 2; // 2프레임 유지 시 즉시 감지
+const PERSISTENCE_FRAMES = 2;
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -43,7 +43,7 @@ startBtn.addEventListener('click', async () => {
         isStreaming = true;
 
         startBtn.style.display = 'none';
-        statusText.innerText = "🖱️ [마우스 드래그] 모루 28개 칸 전체를 드래그해서 네모 상자로 감싸주세요!";
+        statusText.innerText = "🖱️ [드래그] 빈 모루 28개 칸 전체를 네모 상자로 감싸주세요!";
 
         video.addEventListener('loadedmetadata', () => {
             canvas.width = video.videoWidth;
@@ -52,11 +52,10 @@ startBtn.addEventListener('click', async () => {
         });
 
     } catch (err) {
-        statusText.innerText = "❌ 화면 공유가 취소되었거나 오류가 발생했습니다.";
+        statusText.innerText = "❌ 화면 공유 실패";
     }
 });
 
-// 🖱️ 캔버스 마우스 드래그 이벤트 (캔버스 배율 오차 정밀 보정 포함)
 canvas.addEventListener('mousedown', (e) => {
     if (!isStreaming) return;
     const rect = canvas.getBoundingClientRect();
@@ -92,15 +91,14 @@ canvas.addEventListener('mouseup', () => {
     if (isDragging) {
         isDragging = false;
         if (roi && roi.w > 40 && roi.h > 40) {
-            captureBase(); // 영역 지정 직후 해당 위치를 '깨끗한 모루 베이스'로 저장
+            captureBase();
         } else {
             roi = null;
-            statusText.innerText = "⚠️ 영역이 너무 작습니다. 모루 격자를 크게 드래그해 주세요.";
+            statusText.innerText = "⚠️ 드래그 영역이 너무 작습니다.";
         }
     }
 });
 
-// 🎯 지정된 ROI 상자 내부에 28개 모루 칸 격자 동적 생성 (6-8-8-6)
 function getGridCells(roiW, roiH) {
     const cells = [];
     const rowConfig = [
@@ -129,7 +127,6 @@ function getGridCells(roiW, roiH) {
     return cells;
 }
 
-// 📸 지정된 영역 기반 깨끗한 모루 이미지 캡처
 function captureBase() {
     if (!roi) return;
 
@@ -145,7 +142,7 @@ function captureBase() {
     isBaseCaptured = true;
 
     resetStateData();
-    statusText.innerText = "📸 기준 모루 저장 완료! 핀이 나오는 순서를 감지합니다.";
+    statusText.innerText = "📸 기준 빈 모루 저장 완료! 핀 감시 중...";
 
     roiGray.delete();
     srcGray.delete();
@@ -157,7 +154,6 @@ function processFrame() {
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // 1. 드래그 중인 가이드 박스 그리기
     if (isDragging && roi) {
         ctx.strokeStyle = "#FF3366";
         ctx.lineWidth = 3;
@@ -166,9 +162,7 @@ function processFrame() {
         ctx.setLineDash([]);
     }
 
-    // 2. 영역 설정 완료 후 감지 로직 동작
     if (roi && isBaseCaptured) {
-        // 유저 지정 영역 가이드 박스 표시
         ctx.strokeStyle = "#00E676";
         ctx.lineWidth = 2;
         ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
@@ -180,13 +174,31 @@ function processFrame() {
         let rect = new cv.Rect(roi.x, roi.y, roi.w, roi.h);
         let roiGray = srcGray.roi(rect);
 
-        if (!isLocked) {
-            let diffMat = new cv.Mat();
-            let threshMat = new cv.Mat();
+        let diffMat = new cv.Mat();
+        let threshMat = new cv.Mat();
 
-            cv.absdiff(roiGray, baseGrayMat, diffMat);
-            cv.threshold(diffMat, threshMat, 20, 255, cv.THRESH_BINARY); // 미세 핀 민감도 유지
+        cv.absdiff(roiGray, baseGrayMat, diffMat);
+        cv.threshold(diffMat, threshMat, 20, 255, cv.THRESH_BINARY);
 
+        // 전체 영역 변형률 계산 (모루 닫힘/열림 자동 판별용)
+        let totalChangedPixels = cv.countNonZero(threshMat);
+        let totalArea = roi.w * roi.h;
+        let changeRatio = totalChangedPixels / totalArea;
+
+        // 🔄 [5번 핵심 로직] 모루 닫힘 및 재개봉 자동 감지
+        // 1. 변화율이 65% 이상이면 모루 창이 닫혔거나 화면이 벗어난 것임
+        if (changeRatio > 0.65) {
+            isAnvilClosedState = true;
+        } 
+        // 2. 닫혔던 적이 있고, 다시 변화율이 5% 미만(깨끗한 빈 모루)으로 돌아오면 자동 리셋!
+        else if (isAnvilClosedState && changeRatio < 0.05) {
+            isAnvilClosedState = false;
+            resetStateData();
+            statusText.innerText = "🔄 모루 재개봉 감지! 자동으로 다음 핀 감시를 시작합니다.";
+        }
+
+        // 🎯 핀 감지 진행
+        if (!isLocked && !isAnvilClosedState) {
             const gridCells = getGridCells(roi.w, roi.h);
 
             gridCells.forEach((cell, idx) => {
@@ -197,7 +209,6 @@ function processFrame() {
                 let changedPixels = cv.countNonZero(cellROI);
                 cellROI.delete();
 
-                // 핀 픽셀 변화 감지
                 if (changedPixels > (cell.w * cell.h * 0.06)) {
                     cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
 
@@ -216,18 +227,17 @@ function processFrame() {
                 }
             });
 
-            diffMat.delete();
-            threshMat.delete();
-
-            // 1.2초 후 감지 고정
+            // 1.2초간 변화 없으면 잠금
             if (pinSequence.length > 0 && lastPinTimestamp) {
                 if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1200)) {
                     isLocked = true;
-                    statusText.innerText = `🔒 ${pinSequence.length}개 핀 연결 완료! (재설정: 스페이스바/R)`;
+                    statusText.innerText = `🔒 ${pinSequence.length}개 핀 완성! (모루를 닫았다 열면 자동 리셋)`;
                 }
             }
         }
 
+        diffMat.delete();
+        threshMat.delete();
         roiGray.delete();
         srcGray.delete();
         src.delete();
@@ -237,7 +247,6 @@ function processFrame() {
     requestAnimationFrame(processFrame);
 }
 
-// 🎨 번호 및 연결선 시각화
 function drawDetections(pins) {
     if (pins.length === 0) return;
 
@@ -287,19 +296,10 @@ function fullReset() {
     }
     roi = null;
     isBaseCaptured = false;
+    isAnvilClosedState = false;
     resetStateData();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    statusText.innerText = "🖱️ [마우스 드래그] 모루 28개 칸 전체를 드래그해서 네모 상자로 감싸주세요!";
+    statusText.innerText = "🖱️ [드래그] 빈 모루 28개 칸 전체를 네모 상자로 감싸주세요!";
 }
 
 resetBtn.addEventListener('click', fullReset);
-
-window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' || e.key === 'r' || e.key === 'R') {
-        if (roi) {
-            captureBase(); // 기존 위치 유지한 채 깨끗한 베이스만 다시 포착
-        } else {
-            fullReset();
-        }
-    }
-});

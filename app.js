@@ -181,7 +181,7 @@ function processFrame() {
 
             // 1.2초간 핀 추가가 없거나 6개 모두 탐지 시 선 연결 고정
             if (pinSequence.length > 0 && lastPinTimestamp) {
-                if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1200)) {
+                if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 2500)) {
                     isLocked = true;
                     statusText.innerText = `🔒 ${pinSequence.length}개 핀 연결 완료! (모루를 닫으면 자동 리셋)`;
                 }

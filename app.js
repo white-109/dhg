@@ -1,7 +1,3 @@
-// 📌 원본 이미지 1:1 매칭 임계값 (0.80)
-const MATCH_THRESHOLD = 0.80;
-const TOTAL_PINS = 6;
-
 let isOpenCvReady = false;
 let isStreaming = false;
 
@@ -12,58 +8,23 @@ const video = document.getElementById('webcamVideo');
 const canvas = document.getElementById('outputCanvas');
 const ctx = canvas.getContext('2d');
 
-const pinTemplates = {};
-let loadedTemplatesCount = 0;
+// 🎯 상태 제어 변수
+let baseGrayMat = null;              // 깨끗한 모루 베이스 이미지
+let isBaseCaptured = false;          // 베이스 저장 여부
+let registeredCells = new Set();     // 이미 감지 완료된 칸 인덱스
+let cellPersistence = {};            // 칸별 연속 감지 프레임 수 카운터 (마우스 걸러내기용)
+let pinSequence = [];                // 최종 감지된 순차 핀 정보 [{num, x, y}]
+let lastPinTimestamp = null;         // 마지막 핀 감지 시각
+let isLocked = false;                // 잠금 상태 여부
 
-let accumulatedPins = {};            // 순차적으로 감지된 핀 저장
-let lastPinDetectedTimestamp = null;   // 마지막 감지 시각
-let isLocked = false;                  // 잠금 상태 여부
+const TOTAL_PINS = 6;
+const PERSISTENCE_FRAMES = 3;        // ⚡ 핵심: 3프레임(약 0.05초) 이상 유지되어야 진짜 핀으로 인정
 
 function onOpenCvReady() {
     isOpenCvReady = true;
-    statusText.innerText = "엔진 준비 완료! 핀 이미지를 로딩 중입니다...";
-    loadPinTemplates();
-}
-
-// 🎯 GUI 비율 변환 없이 1.0배 원본 이미지 그대로 로드
-function loadPinTemplates() {
-    for (let i = 1; i <= TOTAL_PINS; i++) {
-        const img = new Image();
-        img.src = `pin${i}.png`;
-        img.onload = () => {
-            try {
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width = img.width;
-                tempCanvas.height = img.height;
-                const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.drawImage(img, 0, 0);
-
-                const mat = cv.imread(tempCanvas);
-                const grayMat = new cv.Mat();
-                cv.cvtColor(mat, grayMat, cv.COLOR_RGBA2GRAY);
-
-                pinTemplates[`pin${i}`] = {
-                    mat: grayMat,
-                    width: img.width,
-                    height: img.height
-                };
-
-                mat.delete();
-
-                loadedTemplatesCount++;
-                if (loadedTemplatesCount === TOTAL_PINS) {
-                    statusText.innerText = "🟢 준비 완료! [화면 공유 시작]을 누르세요.";
-                    startBtn.disabled = false;
-                    startBtn.innerText = "🖥️ 화면 공유 시작";
-                }
-            } catch (err) {
-                console.error(`pin${i}.png 변환 실패:`, err);
-            }
-        };
-        img.onerror = () => {
-            statusText.innerText = `⚠️ pin${i}.png 파일이 없습니다.`;
-        };
-    }
+    statusText.innerText = "🟢 엔진 준비 완료! [화면 공유 시작]을 누르세요.";
+    startBtn.disabled = false;
+    startBtn.innerText = "🖥️ 화면 공유 시작";
 }
 
 startBtn.addEventListener('click', async () => {
@@ -78,7 +39,7 @@ startBtn.addEventListener('click', async () => {
         isStreaming = true;
 
         startBtn.style.display = 'none';
-        statusText.innerText = "🟢 실시간 감지 중... 마인크래프트 제련창을 열어주세요.";
+        statusText.innerText = "🟢 실시간 감지 대기 중... 마인크래프트 제련창을 열어주세요.";
 
         video.addEventListener('loadedmetadata', () => {
             canvas.width = video.videoWidth;
@@ -91,14 +52,43 @@ startBtn.addEventListener('click', async () => {
     }
 });
 
+// 🎯 28개 모루 격자 칸(6-8-8-6) 좌표 동적 생성 함수
+function getGridCells(roiW, roiH) {
+    const cells = [];
+    const rowConfig = [
+        { row: 0, cols: 6, offset: 1 }, // 상단 1열 (중앙 6칸)
+        { row: 1, cols: 8, offset: 0 }, // 중단 2열 (8칸)
+        { row: 2, cols: 8, offset: 0 }, // 중단 3열 (8칸)
+        { row: 3, cols: 6, offset: 1 }  // 하단 4열 (중앙 6칸)
+    ];
+
+    const cellW = roiW / 8;
+    const cellH = roiH / 4;
+
+    rowConfig.forEach(cfg => {
+        for (let c = 0; c < cfg.cols; c++) {
+            const colIdx = cfg.offset + c;
+            cells.push({
+                // 슬롯 내부 중앙 60% 구역만 오차 없이 감시
+                x: Math.round(colIdx * cellW + cellW * 0.20),
+                y: Math.round(cfg.row * cellH + cellH * 0.20),
+                w: Math.round(cellW * 0.60),
+                h: Math.round(cellH * 0.60),
+                cx: Math.round((colIdx + 0.5) * cellW),
+                cy: Math.round((cfg.row + 0.5) * cellH)
+            });
+        }
+    });
+    return cells;
+}
+
 function processFrame() {
     if (!isStreaming) return;
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // 고정(Lock) 상태일 경우 결과만 그리기
     if (isLocked) {
-        drawDetections(Object.values(accumulatedPins));
+        drawDetections(pinSequence);
         requestAnimationFrame(processFrame);
         return;
     }
@@ -107,59 +97,81 @@ function processFrame() {
     let srcGray = new cv.Mat();
     cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
 
-    // 🎯 중앙 넉넉한 영역 크롭 (가로 70%, 세로 75%)
-    const cropW = Math.min(srcGray.cols, Math.round(srcGray.cols * 0.70));
-    const cropH = Math.min(srcGray.rows, Math.round(srcGray.rows * 0.75));
-    const cropX = Math.max(0, Math.round((srcGray.cols - cropW) / 2));
-    const cropY = Math.max(0, Math.round((srcGray.rows - cropH) / 2));
+    // 모루 중앙 구역 지정 (가로 60%, 세로 55%)
+    const cropW = Math.round(srcGray.cols * 0.60);
+    const cropH = Math.round(srcGray.rows * 0.55);
+    const cropX = Math.round((srcGray.cols - cropW) / 2);
+    const cropY = Math.round((srcGray.rows - cropH) / 2);
 
     let rect = new cv.Rect(cropX, cropY, cropW, cropH);
     let roiGray = srcGray.roi(rect);
 
-    // ⚡ [순차 감지 핵심 로직] 아직 안 찾은 '가장 첫 번째 핀 번호' 딱 1개만 결정
-    let targetPinNum = 1;
-    while (targetPinNum <= TOTAL_PINS && accumulatedPins[targetPinNum]) {
-        targetPinNum++;
-    }
+    // 1단계: 제련창 회색 모루 배경 진입 여부 검사
+    let meanVal = cv.mean(roiGray)[0];
+    const isAnvilActive = (meanVal >= 40 && meanVal <= 160); // 모루 특유 회색조 범위
 
-    // 아직 다 찾지 못했다면 현재 찾아야 할 targetPinNum 1개만 탐색
-    if (targetPinNum <= TOTAL_PINS) {
-        const tmpl = pinTemplates[`pin${targetPinNum}`];
+    if (!isAnvilActive) {
+        // 제련창을 닫으면 베이스 초기화
+        if (isBaseCaptured) resetState();
+    } else {
+        // 2단계: 제련창 최초 열림 시 베이스 이미지 자동 저장
+        if (!isBaseCaptured) {
+            baseGrayMat = roiGray.clone();
+            isBaseCaptured = true;
+            statusText.innerText = "📸 깨끗한 모루 베이스 캡처 완료! 핀 감시 중...";
+        } else {
+            // 3단계: 차분(Diff) 계산으로 변해버린 픽셀 추출
+            let diffMat = new cv.Mat();
+            let threshMat = new cv.Mat();
 
-        if (tmpl && roiGray.cols >= tmpl.width && roiGray.rows >= tmpl.height) {
-            let result = new cv.Mat();
-            cv.matchTemplate(roiGray, tmpl.mat, result, cv.TM_CCOEFF_NORMED);
+            cv.absdiff(roiGray, baseGrayMat, diffMat);
+            cv.threshold(diffMat, threshMat, 35, 255, cv.THRESH_BINARY);
 
-            let minMax = cv.minMaxLoc(result);
-            let maxVal = minMax.maxVal;
-            let maxLoc = minMax.maxLoc;
+            const gridCells = getGridCells(cropW, cropH);
 
-            if (maxVal >= MATCH_THRESHOLD) {
-                accumulatedPins[targetPinNum] = {
-                    num: targetPinNum,
-                    x: cropX + maxLoc.x + tmpl.width / 2,
-                    y: cropY + maxLoc.y + tmpl.height / 2,
-                    score: (maxVal * 100).toFixed(0)
-                };
-                lastPinDetectedTimestamp = Date.now();
-            }
-            result.delete();
+            gridCells.forEach((cell, idx) => {
+                if (registeredCells.has(idx) || pinSequence.length >= TOTAL_PINS) return;
+
+                let cellRect = new cv.Rect(cell.x, cell.y, cell.w, cell.h);
+                let cellROI = threshMat.roi(cellRect);
+                let changedPixels = cv.countNonZero(cellROI);
+                cellROI.delete();
+
+                // 칸 내 일정 면적 이상 픽셀 변화 감지
+                if (changedPixels > (cell.w * cell.h * 0.15)) {
+                    cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
+
+                    // ⚡ [핵심 필터] 3프레임 연속 유지 시에만 스쳐가는 마우스가 아닌 '진짜 핀'으로 채택!
+                    if (cellPersistence[idx] >= PERSISTENCE_FRAMES) {
+                        registeredCells.add(idx);
+                        pinSequence.push({
+                            num: pinSequence.length + 1,
+                            x: cropX + cell.cx,
+                            y: cropY + cell.cy
+                        });
+                        lastPinTimestamp = Date.now();
+                        statusText.innerText = `📍 ${pinSequence.length}번 핀 감지!`;
+                    }
+                } else {
+                    // 마우스처럼 스쳐 지나가면 연속 프레임 즉시 리셋!
+                    cellPersistence[idx] = 0;
+                }
+            });
+
+            diffMat.delete();
+            threshMat.delete();
         }
     }
 
-    // ⏱️ 6개 핀을 모두 찾았거나, 1개 이상 찾은 후 1.5초간 새 핀이 없으면 완료 잠금
-    const foundCount = Object.keys(accumulatedPins).length;
-    if (foundCount === TOTAL_PINS) {
-        isLocked = true;
-        statusText.innerText = `🔒 6개 핀 완벽 연결 완료! 완료 후 초기화(Space/R)를 누르세요.`;
-    } else if (foundCount > 0 && lastPinDetectedTimestamp) {
-        if (Date.now() - lastPinDetectedTimestamp >= 1500) {
+    // ⏱️ 핀 감지 후 1.5초간 변화가 없거나 6개 모두 찾으면 고정
+    if (pinSequence.length > 0 && lastPinTimestamp) {
+        if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1500)) {
             isLocked = true;
-            statusText.innerText = `🔒 연결 완료 (${foundCount}개 감지). 완료 후 초기화(Space/R)를 누르세요.`;
+            statusText.innerText = `🔒 연결 완료 (${pinSequence.length}개 감지). 제련 후 초기화(Space/R)를 누르세요.`;
         }
     }
 
-    drawDetections(Object.values(accumulatedPins));
+    drawDetections(pinSequence);
 
     roiGray.delete();
     src.delete();
@@ -168,7 +180,7 @@ function processFrame() {
     requestAnimationFrame(processFrame);
 }
 
-// 🎨 원형 숫자 배지 + 연두색 연결선 시각화
+// 🎨 원형 번호 배지 + 연결선 그려주기
 function drawDetections(pins) {
     if (pins.length === 0) return;
 
@@ -187,7 +199,7 @@ function drawDetections(pins) {
         ctx.stroke();
     }
 
-    // 2. 번호 배지
+    // 2. 번호 동그라미 배지
     pins.forEach((pin) => {
         const radius = 16;
 
@@ -208,12 +220,19 @@ function drawDetections(pins) {
 }
 
 function resetState() {
-    accumulatedPins = {};
-    lastPinDetectedTimestamp = null;
+    if (baseGrayMat) {
+        baseGrayMat.delete();
+        baseGrayMat = null;
+    }
+    isBaseCaptured = false;
+    registeredCells.clear();
+    cellPersistence = {};
+    pinSequence = [];
+    lastPinTimestamp = null;
     isLocked = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (isStreaming) {
-        statusText.innerText = "🟢 실시간 감지 중... 마인크래프트 제련창을 열어주세요.";
+        statusText.innerText = "🟢 실시간 감지 대기 중... 마인크래프트 제련창을 열어주세요.";
     }
 }
 

@@ -15,12 +15,15 @@ let currentX = 0, currentY = 0;
 
 let baseGrayMat = null;
 let isBaseCaptured = false;
+
+// 🔄 상태 제어: 'IDLE' -> 'WAIT_CLOSE' -> 'WAIT_OPEN' -> 'DETECTING'
+let currentState = 'IDLE'; 
+
 let registeredCells = new Set();
 let cellPersistence = {};
 let pinSequence = [];
 let lastPinTimestamp = null;
 let isLocked = false;
-let isAnvilClosedState = false; // 🔄 모루가 닫혔었는지 추적하는 플래그
 
 const TOTAL_PINS = 6;
 const PERSISTENCE_FRAMES = 2;
@@ -52,7 +55,7 @@ startBtn.addEventListener('click', async () => {
         });
 
     } catch (err) {
-        statusText.innerText = "❌ 화면 공유 실패";
+        statusText.innerText = "❌ 화면 공유가 취소되었거나 오류가 발생했습니다.";
     }
 });
 
@@ -67,6 +70,7 @@ canvas.addEventListener('mousedown', (e) => {
     isDragging = true;
     roi = null;
     isBaseCaptured = false;
+    currentState = 'IDLE';
     resetStateData();
 });
 
@@ -141,8 +145,10 @@ function captureBase() {
     baseGrayMat = roiGray.clone();
     isBaseCaptured = true;
 
+    // 🎯 영역 지정 직후 모루가 '닫힐 때까지' 대기하는 상태로 변경
+    currentState = 'WAIT_CLOSE';
     resetStateData();
-    statusText.innerText = "📸 기준 빈 모루 저장 완료! 핀 감시 중...";
+    statusText.innerText = "📸 기준 이미지 저장 완료! 🛑 모루 창을 한번 닫아주세요.";
 
     roiGray.delete();
     srcGray.delete();
@@ -163,10 +169,6 @@ function processFrame() {
     }
 
     if (roi && isBaseCaptured) {
-        ctx.strokeStyle = "#00E676";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
-
         let src = cv.imread(canvas);
         let srcGray = new cv.Mat();
         cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
@@ -178,60 +180,78 @@ function processFrame() {
         let threshMat = new cv.Mat();
 
         cv.absdiff(roiGray, baseGrayMat, diffMat);
-        cv.threshold(diffMat, threshMat, 20, 255, cv.THRESH_BINARY);
+        cv.threshold(diffMat, threshMat, 25, 255, cv.THRESH_BINARY);
 
-        // 전체 영역 변형률 계산 (모루 닫힘/열림 자동 판별용)
         let totalChangedPixels = cv.countNonZero(threshMat);
-        let totalArea = roi.w * roi.h;
-        let changeRatio = totalChangedPixels / totalArea;
+        let changeRatio = totalChangedPixels / (roi.w * roi.h);
 
-        // 🔄 [5번 핵심 로직] 모루 닫힘 및 재개봉 자동 감지
-        // 1. 변화율이 65% 이상이면 모루 창이 닫혔거나 화면이 벗어난 것임
-        if (changeRatio > 0.65) {
-            isAnvilClosedState = true;
+        // 🔄 1단계: 드래그 후 모루 창이 닫혀서 이미지가 사라질 때까지 대기
+        if (currentState === 'WAIT_CLOSE') {
+            ctx.strokeStyle = "#FF9800"; // 주황색 가이드라인
+            ctx.lineWidth = 2;
+            ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+
+            if (changeRatio > 0.45) { // 화면이 45% 이상 달라지면 모루 닫힘으로 판별
+                currentState = 'WAIT_OPEN';
+                statusText.innerText = "🟢 대기 중... 모루 창을 다시 열면 자동으로 핀 감시가 시작됩니다.";
+            }
         } 
-        // 2. 닫혔던 적이 있고, 다시 변화율이 5% 미만(깨끗한 빈 모루)으로 돌아오면 자동 리셋!
-        else if (isAnvilClosedState && changeRatio < 0.05) {
-            isAnvilClosedState = false;
-            resetStateData();
-            statusText.innerText = "🔄 모루 재개봉 감지! 자동으로 다음 핀 감시를 시작합니다.";
-        }
+        // 🔄 2단계: 모루 창이 다시 열려 기억해둔 '빈 모루'가 완전히 찍힐 때까지 대기
+        else if (currentState === 'WAIT_OPEN') {
+            ctx.strokeStyle = "#2196F3"; // 파란색 가이드라인
+            ctx.lineWidth = 2;
+            ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-        // 🎯 핀 감지 진행
-        if (!isLocked && !isAnvilClosedState) {
-            const gridCells = getGridCells(roi.w, roi.h);
+            if (changeRatio < 0.08) { // 차이율 8% 미만 (빈 모루 재등장)
+                currentState = 'DETECTING';
+                resetStateData();
+                statusText.innerText = "🎯 빈 모루 감지 완료! 핀 인식 작동 시작...";
+            }
+        } 
+        // 🔄 3단계: 핀 인식 및 기록 수행
+        else if (currentState === 'DETECTING') {
+            ctx.strokeStyle = "#00E676"; // 초록색 가이드라인
+            ctx.lineWidth = 2;
+            ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            gridCells.forEach((cell, idx) => {
-                if (registeredCells.has(idx) || pinSequence.length >= TOTAL_PINS) return;
+            // 제련 진행 중 모루 창이 닫히면 다시 재열림 대기 상태로 전환
+            if (changeRatio > 0.50) {
+                currentState = 'WAIT_OPEN';
+                statusText.innerText = "🟢 모루 닫힘 감지. 다음 제련 대기 중...";
+            } else if (!isLocked) {
+                const gridCells = getGridCells(roi.w, roi.h);
 
-                let cellRect = new cv.Rect(cell.x, cell.y, cell.w, cell.h);
-                let cellROI = threshMat.roi(cellRect);
-                let changedPixels = cv.countNonZero(cellROI);
-                cellROI.delete();
+                gridCells.forEach((cell, idx) => {
+                    if (registeredCells.has(idx) || pinSequence.length >= TOTAL_PINS) return;
 
-                if (changedPixels > (cell.w * cell.h * 0.06)) {
-                    cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
+                    let cellRect = new cv.Rect(cell.x, cell.y, cell.w, cell.h);
+                    let cellROI = threshMat.roi(cellRect);
+                    let changedPixels = cv.countNonZero(cellROI);
+                    cellROI.delete();
 
-                    if (cellPersistence[idx] >= PERSISTENCE_FRAMES) {
-                        registeredCells.add(idx);
-                        pinSequence.push({
-                            num: pinSequence.length + 1,
-                            x: roi.x + cell.cx,
-                            y: roi.y + cell.cy
-                        });
-                        lastPinTimestamp = Date.now();
-                        statusText.innerText = `📍 ${pinSequence.length}번 핀 감지!`;
+                    if (changedPixels > (cell.w * cell.h * 0.06)) {
+                        cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
+
+                        if (cellPersistence[idx] >= PERSISTENCE_FRAMES) {
+                            registeredCells.add(idx);
+                            pinSequence.push({
+                                num: pinSequence.length + 1,
+                                x: roi.x + cell.cx,
+                                y: roi.y + cell.cy
+                            });
+                            lastPinTimestamp = Date.now();
+                            statusText.innerText = `📍 ${pinSequence.length}번 핀 감지!`;
+                        }
+                    } else {
+                        cellPersistence[idx] = 0;
                     }
-                } else {
-                    cellPersistence[idx] = 0;
-                }
-            });
+                });
 
-            // 1.2초간 변화 없으면 잠금
-            if (pinSequence.length > 0 && lastPinTimestamp) {
-                if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1200)) {
-                    isLocked = true;
-                    statusText.innerText = `🔒 ${pinSequence.length}개 핀 완성! (모루를 닫았다 열면 자동 리셋)`;
+                if (pinSequence.length > 0 && lastPinTimestamp) {
+                    if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1200)) {
+                        isLocked = true;
+                        statusText.innerText = `🔒 ${pinSequence.length}개 핀 순서 완성! (모루를 닫으면 초기화)`;
+                    }
                 }
             }
         }
@@ -248,7 +268,7 @@ function processFrame() {
 }
 
 function drawDetections(pins) {
-    if (pins.length === 0) return;
+    if (pins.length === 0 || currentState !== 'DETECTING') return;
 
     pins.sort((a, b) => a.num - b.num);
 
@@ -296,7 +316,7 @@ function fullReset() {
     }
     roi = null;
     isBaseCaptured = false;
-    isAnvilClosedState = false;
+    currentState = 'IDLE';
     resetStateData();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     statusText.innerText = "🖱️ [드래그] 빈 모루 28개 칸 전체를 네모 상자로 감싸주세요!";

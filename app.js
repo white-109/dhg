@@ -15,10 +15,10 @@ let cellPersistence = {};
 let pinSequence = [];
 let lastPinTimestamp = null;
 let isLocked = false;
-let anvilStableFrames = 0; // 모루 화면 안정화 프레임 카운터
+let anvilStableFrames = 0; // 모루 화면 안정을 위한 카운터
 
 const TOTAL_PINS = 6;
-const PERSISTENCE_FRAMES = 3; // 3프레임(약 0.05초) 고정 시 핀 인식
+const PERSISTENCE_FRAMES = 2; // ⚡ 2프레임(약 0.03초) 이상 지속 시 즉시 핀 채택
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -47,16 +47,15 @@ startBtn.addEventListener('click', async () => {
         });
 
     } catch (err) {
-        statusText.innerText = "❌ 화면 공유가 취소되었습니다.";
+        statusText.innerText = "❌ 화면 공유가 취소되었거나 오류가 발생했습니다.";
     }
 });
 
-// ⚡ [핵심 3번 아이디어] 화면 중앙 20x20 단일 픽셀 무채색(회색) 단층 검사
+// ⚡ 1. 화면 중앙 무채색(회색) 단층 실시간 검사 (오인식 0% 방어막)
 function isAnvilCenterPresent(srcMat) {
     const centerX = Math.round(srcMat.cols / 2);
     const centerY = Math.round(srcMat.rows / 2);
-    
-    // 중앙 20x20 영역 잘라내기 (연산량 거의 0)
+
     let rect = new cv.Rect(centerX - 10, centerY - 10, 20, 20);
     let roi = srcMat.roi(rect);
     let mean = cv.mean(roi);
@@ -67,15 +66,14 @@ function isAnvilCenterPresent(srcMat) {
     const b = mean[2];
     const avg = (r + g + b) / 3;
 
-    // 1. R, G, B 차이가 10 이색 미만인 '완벽한 무채색(회색)'인가?
+    // R, G, B 차이가 적은 순수 회색이며 모루 돌판 명도 범주에 들어오는지 판단
     const isGray = (Math.abs(r - g) < 10) && (Math.abs(g - b) < 10) && (Math.abs(r - b) < 10);
-    // 2. 모루 돌판 특유의 회색 밝기 범위(60 ~ 140) 안에 들어오는가?
     const isAnvilBrightness = (avg >= 60 && avg <= 140);
 
     return isGray && isAnvilBrightness;
 }
 
-// 28개 격자 칸 좌표 생성 (제련하기 버튼 및 하단 영역 제외)
+// ⚡ 2. 28개 격자 칸 좌표 산출 (75% 범위로 영역 넓혀 인식률 극대화)
 function getGridCells(roiW, roiH) {
     const cells = [];
     const rowConfig = [
@@ -92,10 +90,10 @@ function getGridCells(roiW, roiH) {
         for (let c = 0; c < cfg.cols; c++) {
             const colIdx = cfg.offset + c;
             cells.push({
-                x: Math.round(colIdx * cellW + cellW * 0.25),
-                y: Math.round(cfg.row * cellH + cellH * 0.25),
-                w: Math.round(cellW * 0.50),
-                h: Math.round(cellH * 0.50),
+                x: Math.round(colIdx * cellW + cellW * 0.125),
+                y: Math.round(cfg.row * cellH + cellH * 0.125),
+                w: Math.round(cellW * 0.75),
+                h: Math.round(cellH * 0.75),
                 cx: Math.round((colIdx + 0.5) * cellW),
                 cy: Math.round((cfg.row + 0.5) * cellH)
             });
@@ -104,28 +102,28 @@ function getGridCells(roiW, roiH) {
     return cells;
 }
 
+// ⚡ 3. 메인 프레임 처리 연산
 function processFrame() {
     if (!isStreaming) return;
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     let src = cv.imread(canvas);
-    
-    // 1. 중앙 회색 도미넌스 검사
+
+    // 중앙 회색 검사로 모루 창 개방 여부 감지
     const isAnvilOpen = isAnvilCenterPresent(src);
 
     if (!isAnvilOpen) {
-        // 모루 창이 닫혀있으면 카운터 및 데이터 자동 초기화
+        // 모루 창을 닫으면 자동 상태 초기화
         anvilStableFrames = 0;
         if (isBaseCaptured) resetState();
     } else {
-        // 모루 창이 열려있는 동안
         anvilStableFrames++;
 
-        // 모루 중앙 구역 지정 (망치 뒷 배경 28개 칸 중심)
         let srcGray = new cv.Mat();
         cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
 
+        // 모루 중앙 격자 구역 매핑
         const cropW = Math.round(srcGray.cols * 0.50);
         const cropH = Math.round(srcGray.rows * 0.38);
         const cropX = Math.round((srcGray.cols - cropW) / 2);
@@ -134,19 +132,20 @@ function processFrame() {
         let rect = new cv.Rect(cropX, cropY, cropW, cropH);
         let roiGray = srcGray.roi(rect);
 
-        // 2. 모루 창이 열리고 6프레임(약 0.1초)간 안정화되면 깨끗한 베이스 '자동 순간포착'
+        // 모루 열림 후 6프레임(약 0.1초) 뒤 베이스 자동 포착
         if (!isBaseCaptured && anvilStableFrames >= 6) {
             baseGrayMat = roiGray.clone();
             isBaseCaptured = true;
-            statusText.innerText = "📸 모루 베이스 자동 저장 완료! 핀 감시 중...";
+            statusText.innerText = "📸 깨끗한 모루 베이스 저장 완료! 핀 감시 중...";
         } 
-        // 3. 베이스가 잡힌 후 실시간 차분(Diff) 감지 진행
+        // 핀 실시간 추적 진행
         else if (isBaseCaptured && !isLocked) {
             let diffMat = new cv.Mat();
             let threshMat = new cv.Mat();
 
             cv.absdiff(roiGray, baseGrayMat, diffMat);
-            cv.threshold(diffMat, threshMat, 40, 255, cv.THRESH_BINARY);
+            // ⚡ 임계값 22로 대폭 완화하여 미세한 핀 변화도 확실하게 포착
+            cv.threshold(diffMat, threshMat, 22, 255, cv.THRESH_BINARY);
 
             const gridCells = getGridCells(cropW, cropH);
 
@@ -158,7 +157,8 @@ function processFrame() {
                 let changedPixels = cv.countNonZero(cellROI);
                 cellROI.delete();
 
-                if (changedPixels > (cell.w * cell.h * 0.18)) {
+                // ⚡ 필요 면적 비율 7%로 민감도 대폭 상승
+                if (changedPixels > (cell.w * cell.h * 0.07)) {
                     cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
 
                     if (cellPersistence[idx] >= PERSISTENCE_FRAMES) {
@@ -179,11 +179,11 @@ function processFrame() {
             diffMat.delete();
             threshMat.delete();
 
-            // 1.5초간 새 핀이 안 나오거나 6개 다 찾으면 잠금
+            // 1.2초간 핀 추가가 없거나 6개 모두 탐지 시 선 연결 고정
             if (pinSequence.length > 0 && lastPinTimestamp) {
-                if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1500)) {
+                if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1200)) {
                     isLocked = true;
-                    statusText.innerText = `🔒 ${pinSequence.length}개 순서 완성! (모루를 닫으면 자동 리셋)`;
+                    statusText.innerText = `🔒 ${pinSequence.length}개 핀 연결 완료! (모루를 닫으면 자동 리셋)`;
                 }
             }
         }
@@ -198,6 +198,7 @@ function processFrame() {
     requestAnimationFrame(processFrame);
 }
 
+// 🎨 4. 번호 배지 및 연결 선 시각화
 function drawDetections(pins) {
     if (pins.length === 0) return;
 
@@ -211,6 +212,7 @@ function drawDetections(pins) {
         }
         ctx.strokeStyle = "#00FF66";
         ctx.lineWidth = 5;
+        ctx.lineJoin = "round";
         ctx.stroke();
     }
 
@@ -231,6 +233,7 @@ function drawDetections(pins) {
     });
 }
 
+// 🔄 5. 상태 리셋 함수
 function resetState() {
     if (baseGrayMat) {
         baseGrayMat.delete();
@@ -250,3 +253,8 @@ function resetState() {
 }
 
 resetBtn.addEventListener('click', resetState);
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+        resetState();
+    }
+});

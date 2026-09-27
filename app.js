@@ -46,7 +46,7 @@ startBtn.addEventListener('click', async () => {
         isStreaming = true;
 
         startBtn.style.display = 'none';
-        statusText.innerText = "제련하기 후 순서가 모두 지나간 빈 모루를 드래그해주세요.;
+        statusText.innerText = "제련하기 후 순서가 모두 지나간 빈 모루를 드래그해주세요.";
 
         video.addEventListener('loadedmetadata', () => {
             canvas.width = video.videoWidth;

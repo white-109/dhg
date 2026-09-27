@@ -26,11 +26,11 @@ let isLocked = false;
 
 const TOTAL_PINS = 6;
 const PERSISTENCE_FRAMES = 2;
-const MIN_PIN_INTERVAL_MS = 180; // 핀 감지 최소 간격 (중복 감지 방지)
+const MIN_PIN_INTERVAL_MS = 100; 
 
 function onOpenCvReady() {
     isOpenCvReady = true;
-    statusText.innerText = "🟢 엔진 준비 완료! [화면 공유 시작]을 누르세요.";
+    statusText.innerText = "  화면 공유를 해주세요.";
     startBtn.disabled = false;
 }
 
@@ -46,7 +46,7 @@ startBtn.addEventListener('click', async () => {
         isStreaming = true;
 
         startBtn.style.display = 'none';
-        statusText.innerText = "🖱️ [드래그] 빈 모루 28개 칸 전체를 네모 상자로 감싸주세요!";
+        statusText.innerText = "제련하기 후 순서가 모두 지나간 빈 모루를 드래그해주세요.;
 
         video.addEventListener('loadedmetadata', () => {
             canvas.width = video.videoWidth;
@@ -55,7 +55,7 @@ startBtn.addEventListener('click', async () => {
         });
 
     } catch (err) {
-        statusText.innerText = "❌ 화면 공유 실패";
+        statusText.innerText = "화면 공유 취소";
     }
 });
 
@@ -98,12 +98,11 @@ canvas.addEventListener('mouseup', () => {
             captureBase();
         } else {
             roi = null;
-            statusText.innerText = "⚠️ 드래그 영역이 너무 작습니다.";
+            statusText.innerText = "드래그 영역이 너무 작습니다.";
         }
     }
 });
 
-// 🎯 이웃 칸 번짐 방지를 위해 각 셀의 중앙 55% 영역만 정확히 감시
 function getGridCells(roiW, roiH) {
     const cells = [];
     const rowConfig = [
@@ -148,7 +147,7 @@ function captureBase() {
 
     currentState = 'WAIT_CLOSE';
     resetStateData();
-    statusText.innerText = "📸 기준 저장 완료! 🛑 모루 창을 한번 닫아주세요.";
+    statusText.innerText = "모루 창을 한번 닫아주세요.";
 
     roiGray.delete();
     srcGray.delete();
@@ -185,7 +184,6 @@ function processFrame() {
         let totalChangedPixels = cv.countNonZero(threshMat);
         let changeRatio = totalChangedPixels / (roi.w * roi.h);
 
-        // 1단계: 모루 닫힘 대기
         if (currentState === 'WAIT_CLOSE') {
             ctx.strokeStyle = "#FF9800";
             ctx.lineWidth = 2;
@@ -193,10 +191,9 @@ function processFrame() {
 
             if (changeRatio > 0.45) {
                 currentState = 'WAIT_OPEN';
-                statusText.innerText = "🟢 대기 중... 모루 창을 다시 열어주세요.";
+                statusText.innerText = "제련을 시작하세요.";
             }
         } 
-        // 2단계: 빈 모루 재개봉 대기
         else if (currentState === 'WAIT_OPEN') {
             ctx.strokeStyle = "#2196F3";
             ctx.lineWidth = 2;
@@ -205,10 +202,9 @@ function processFrame() {
             if (changeRatio < 0.08) {
                 currentState = 'DETECTING';
                 resetStateData();
-                statusText.innerText = "🎯 빈 모루 감지 완료! 핀 감시 중...";
+                statusText.innerText = "순서 감지중";
             }
         } 
-        // 3단계: 정밀 핀 인식
         else if (currentState === 'DETECTING') {
             ctx.strokeStyle = "#00E676";
             ctx.lineWidth = 2;
@@ -216,12 +212,11 @@ function processFrame() {
 
             if (changeRatio > 0.50) {
                 currentState = 'WAIT_OPEN';
-                statusText.innerText = "🟢 모루 닫힘 감지. 다음 제련 대기 중...";
+                statusText.innerText = "다음 제련 대기 중";
             } else if (!isLocked) {
                 const gridCells = getGridCells(roi.w, roi.h);
                 const now = Date.now();
 
-                // 시간차 쿨다운 확인
                 const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
 
                 let bestCandidate = null;
@@ -237,9 +232,7 @@ function processFrame() {
                     if (changedPixels > (cell.w * cell.h * 0.08)) {
                         cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
 
-                        // 한 프레임에서 가장 변화량이 큰 단 하나의 칸만 후보로 선정
                         if (cellPersistence[idx] >= PERSISTENCE_FRAMES && changedPixels > maxChanged) {
-                            // 무게중심(Centroid) 계산으로 핀 중심점 정밀 추적
                             let M = cv.moments(cellROI, true);
                             let centerX = (M.m00 > 0) ? Math.round(M.m10 / M.m00) : Math.round(cell.w / 2);
                             let centerY = (M.m00 > 0) ? Math.round(M.m01 / M.m00) : Math.round(cell.h / 2);
@@ -257,7 +250,6 @@ function processFrame() {
                     cellROI.delete();
                 });
 
-                // 가장 유력한 1개 핀만 채택 및 등록
                 if (bestCandidate && isCooldownReady) {
                     registeredCells.add(bestCandidate.idx);
                     pinSequence.push({
@@ -266,13 +258,13 @@ function processFrame() {
                         y: bestCandidate.y
                     });
                     lastPinTimestamp = now;
-                    statusText.innerText = `📍 ${pinSequence.length}번 핀 감지!`;
+                    statusText.innerText = ` ${pinSequence.length}번 순서 확인`;
                 }
 
                 if (pinSequence.length > 0 && lastPinTimestamp) {
                     if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 1200)) {
                         isLocked = true;
-                        statusText.innerText = `🔒 ${pinSequence.length}개 핀 완벽 연결! (모루를 닫으면 자동 리셋)`;
+                        statusText.innerText = `${pinSequence.length}개 순서확인.`;
                     }
                 }
             }
@@ -341,7 +333,7 @@ function fullReset() {
     currentState = 'IDLE';
     resetStateData();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    statusText.innerText = "🖱️ [드래그] 빈 모루 28개 칸 전체를 네모 상자로 감싸주세요!";
+    statusText.innerText = "제련하기 후 순서가 모두 지나간 빈 모루를 드래그해주세요.";
 }
 
 resetBtn.addEventListener('click', fullReset);

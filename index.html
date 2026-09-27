@@ -34,10 +34,15 @@
             display: flex;
             flex-direction: column;
             align-items: center;
+            justify-content: center;
         }
+        /* 동영상 크기 고정 및 비율 유지 설정 */
         .guide-video {
             width: 100%;
             max-width: 320px;
+            height: auto;
+            max-height: 200px;
+            object-fit: contain;
             border-radius: 8px;
             border: 2px solid #333;
             background-color: #000;
@@ -135,7 +140,8 @@
 
     <div class="top-container">
         <div class="video-box">
-            <video class="G-video" controls preload="metadata">
+            <!-- class명을 CSS와 동일하게 guide-video로 통일 -->
+            <video class="guide-video" controls preload="metadata">
                 <source src="G.mp4" type="video/mp4">
                 브라우저가 동영상 재생을 지원하지 않습니다.
             </video>
@@ -152,7 +158,6 @@
             </div>
         </div>
 
-  
         <div class="contact-box">
             <h3>버그제보, 문의</h3>
             <p>인게임 : <b>인형</b></p>

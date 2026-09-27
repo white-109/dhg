@@ -16,8 +16,7 @@ let currentX = 0, currentY = 0;
 let baseGrayMat = null;
 let isBaseCaptured = false;
 
-// 🔄 상태 제어: 'IDLE' -> 'WAIT_CLOSE' -> 'WAIT_OPEN' -> 'DETECTING'
-let currentState = 'IDLE'; 
+let currentState = 'IDLE'; // IDLE -> WAIT_CLOSE -> WAIT_OPEN -> DETECTING
 
 let registeredCells = new Set();
 let cellPersistence = {};
@@ -27,6 +26,7 @@ let isLocked = false;
 
 const TOTAL_PINS = 6;
 const PERSISTENCE_FRAMES = 2;
+const MIN_PIN_INTERVAL_MS = 180; // 핀 감지 최소 간격 (중복 감지 방지)
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -55,7 +55,7 @@ startBtn.addEventListener('click', async () => {
         });
 
     } catch (err) {
-        statusText.innerText = "❌ 화면 공유가 취소되었거나 오류가 발생했습니다.";
+        statusText.innerText = "❌ 화면 공유 실패";
     }
 });
 
@@ -103,6 +103,7 @@ canvas.addEventListener('mouseup', () => {
     }
 });
 
+// 🎯 이웃 칸 번짐 방지를 위해 각 셀의 중앙 55% 영역만 정확히 감시
 function getGridCells(roiW, roiH) {
     const cells = [];
     const rowConfig = [
@@ -119,12 +120,12 @@ function getGridCells(roiW, roiH) {
         for (let c = 0; c < cfg.cols; c++) {
             const colIdx = cfg.offset + c;
             cells.push({
-                x: Math.round(colIdx * cellW + cellW * 0.10),
-                y: Math.round(cfg.row * cellH + cellH * 0.10),
-                w: Math.round(cellW * 0.80),
-                h: Math.round(cellH * 0.80),
-                cx: Math.round((colIdx + 0.5) * cellW),
-                cy: Math.round((cfg.row + 0.5) * cellH)
+                x: Math.round(colIdx * cellW + cellW * 0.225),
+                y: Math.round(cfg.row * cellH + cellH * 0.225),
+                w: Math.round(cellW * 0.55),
+                h: Math.round(cellH * 0.55),
+                cellW: cellW,
+                cellH: cellH
             });
         }
     });
@@ -145,10 +146,9 @@ function captureBase() {
     baseGrayMat = roiGray.clone();
     isBaseCaptured = true;
 
-    // 🎯 영역 지정 직후 모루가 '닫힐 때까지' 대기하는 상태로 변경
     currentState = 'WAIT_CLOSE';
     resetStateData();
-    statusText.innerText = "📸 기준 이미지 저장 완료! 🛑 모루 창을 한번 닫아주세요.";
+    statusText.innerText = "📸 기준 저장 완료! 🛑 모루 창을 한번 닫아주세요.";
 
     roiGray.delete();
     srcGray.delete();
@@ -185,41 +185,47 @@ function processFrame() {
         let totalChangedPixels = cv.countNonZero(threshMat);
         let changeRatio = totalChangedPixels / (roi.w * roi.h);
 
-        // 🔄 1단계: 드래그 후 모루 창이 닫혀서 이미지가 사라질 때까지 대기
+        // 1단계: 모루 닫힘 대기
         if (currentState === 'WAIT_CLOSE') {
-            ctx.strokeStyle = "#FF9800"; // 주황색 가이드라인
+            ctx.strokeStyle = "#FF9800";
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            if (changeRatio > 0.45) { // 화면이 45% 이상 달라지면 모루 닫힘으로 판별
+            if (changeRatio > 0.45) {
                 currentState = 'WAIT_OPEN';
-                statusText.innerText = "🟢 대기 중... 모루 창을 다시 열면 자동으로 핀 감시가 시작됩니다.";
+                statusText.innerText = "🟢 대기 중... 모루 창을 다시 열어주세요.";
             }
         } 
-        // 🔄 2단계: 모루 창이 다시 열려 기억해둔 '빈 모루'가 완전히 찍힐 때까지 대기
+        // 2단계: 빈 모루 재개봉 대기
         else if (currentState === 'WAIT_OPEN') {
-            ctx.strokeStyle = "#2196F3"; // 파란색 가이드라인
+            ctx.strokeStyle = "#2196F3";
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            if (changeRatio < 0.08) { // 차이율 8% 미만 (빈 모루 재등장)
+            if (changeRatio < 0.08) {
                 currentState = 'DETECTING';
                 resetStateData();
-                statusText.innerText = "🎯 빈 모루 감지 완료! 핀 인식 작동 시작...";
+                statusText.innerText = "🎯 빈 모루 감지 완료! 핀 감시 중...";
             }
         } 
-        // 🔄 3단계: 핀 인식 및 기록 수행
+        // 3단계: 정밀 핀 인식
         else if (currentState === 'DETECTING') {
-            ctx.strokeStyle = "#00E676"; // 초록색 가이드라인
+            ctx.strokeStyle = "#00E676";
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            // 제련 진행 중 모루 창이 닫히면 다시 재열림 대기 상태로 전환
             if (changeRatio > 0.50) {
                 currentState = 'WAIT_OPEN';
                 statusText.innerText = "🟢 모루 닫힘 감지. 다음 제련 대기 중...";
             } else if (!isLocked) {
                 const gridCells = getGridCells(roi.w, roi.h);
+                const now = Date.now();
+
+                // 시간차 쿨다운 확인
+                const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
+
+                let bestCandidate = null;
+                let maxChanged = 0;
 
                 gridCells.forEach((cell, idx) => {
                     if (registeredCells.has(idx) || pinSequence.length >= TOTAL_PINS) return;
@@ -227,30 +233,46 @@ function processFrame() {
                     let cellRect = new cv.Rect(cell.x, cell.y, cell.w, cell.h);
                     let cellROI = threshMat.roi(cellRect);
                     let changedPixels = cv.countNonZero(cellROI);
-                    cellROI.delete();
 
-                    if (changedPixels > (cell.w * cell.h * 0.06)) {
+                    if (changedPixels > (cell.w * cell.h * 0.08)) {
                         cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
 
-                        if (cellPersistence[idx] >= PERSISTENCE_FRAMES) {
-                            registeredCells.add(idx);
-                            pinSequence.push({
-                                num: pinSequence.length + 1,
-                                x: roi.x + cell.cx,
-                                y: roi.y + cell.cy
-                            });
-                            lastPinTimestamp = Date.now();
-                            statusText.innerText = `📍 ${pinSequence.length}번 핀 감지!`;
+                        // 한 프레임에서 가장 변화량이 큰 단 하나의 칸만 후보로 선정
+                        if (cellPersistence[idx] >= PERSISTENCE_FRAMES && changedPixels > maxChanged) {
+                            // 무게중심(Centroid) 계산으로 핀 중심점 정밀 추적
+                            let M = cv.moments(cellROI, true);
+                            let centerX = (M.m00 > 0) ? Math.round(M.m10 / M.m00) : Math.round(cell.w / 2);
+                            let centerY = (M.m00 > 0) ? Math.round(M.m01 / M.m00) : Math.round(cell.h / 2);
+
+                            maxChanged = changedPixels;
+                            bestCandidate = {
+                                idx: idx,
+                                x: roi.x + cell.x + centerX,
+                                y: roi.y + cell.y + centerY
+                            };
                         }
                     } else {
                         cellPersistence[idx] = 0;
                     }
+                    cellROI.delete();
                 });
 
+                // 가장 유력한 1개 핀만 채택 및 등록
+                if (bestCandidate && isCooldownReady) {
+                    registeredCells.add(bestCandidate.idx);
+                    pinSequence.push({
+                        num: pinSequence.length + 1,
+                        x: bestCandidate.x,
+                        y: bestCandidate.y
+                    });
+                    lastPinTimestamp = now;
+                    statusText.innerText = `📍 ${pinSequence.length}번 핀 감지!`;
+                }
+
                 if (pinSequence.length > 0 && lastPinTimestamp) {
-                    if (pinSequence.length === TOTAL_PINS || (Date.now() - lastPinTimestamp >= 1200)) {
+                    if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 1200)) {
                         isLocked = true;
-                        statusText.innerText = `🔒 ${pinSequence.length}개 핀 순서 완성! (모루를 닫으면 초기화)`;
+                        statusText.innerText = `🔒 ${pinSequence.length}개 핀 완벽 연결! (모루를 닫으면 자동 리셋)`;
                     }
                 }
             }

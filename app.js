@@ -25,12 +25,12 @@ let lastPinTimestamp = null;
 let isLocked = false;
 
 const TOTAL_PINS = 6;
-const PERSISTENCE_FRAMES = 2;
-const MIN_PIN_INTERVAL_MS = 100; 
+const PERSISTENCE_FRAMES = 1; // 2 -> 1로 수정 (프레임 드랍 시 1프레임만 찍혀도 즉시 인식)
+const MIN_PIN_INTERVAL_MS = 80;  // 100 -> 80으로 수정 (빠른 연속 연산 대응)
 
 function onOpenCvReady() {
     isOpenCvReady = true;
-    statusText.innerText = "  화면 공유를 해주세요.";
+    statusText.innerText = " 화면 공유를 해주세요.";
     startBtn.disabled = false;
 }
 
@@ -189,7 +189,7 @@ function processFrame() {
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            if (changeRatio > 0.45) {
+            if (changeRatio > 0.40) {
                 currentState = 'WAIT_OPEN';
                 statusText.innerText = "제련을 시작하세요.";
             }
@@ -199,7 +199,8 @@ function processFrame() {
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            if (changeRatio < 0.08) {
+            // 임계값을 0.08 -> 0.18로 완화하여 모루창이 열리자마자 1번 핀을 놓치지 않고 감지 모드로 빠르게 진입
+            if (changeRatio < 0.18) {
                 currentState = 'DETECTING';
                 resetStateData();
                 statusText.innerText = "순서 감지중";
@@ -210,7 +211,8 @@ function processFrame() {
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            if (changeRatio > 0.50) {
+            // 핀 인식 진행 중 망치 애니메이션에 의해 대기 상태로 강제 리셋되는 것을 방지 (0.50 -> 0.75)
+            if (changeRatio > 0.75 && pinSequence.length === 0) {
                 currentState = 'WAIT_OPEN';
                 statusText.innerText = "다음 제련 대기 중";
             } else if (!isLocked) {
@@ -229,7 +231,8 @@ function processFrame() {
                     let cellROI = threshMat.roi(cellRect);
                     let changedPixels = cv.countNonZero(cellROI);
 
-                    if (changedPixels > (cell.w * cell.h * 0.08)) {
+                    // 셀 민감도를 0.08 -> 0.04로 완화 (살짝 찍힌 핀도 놓치지 않음)
+                    if (changedPixels > (cell.w * cell.h * 0.04)) {
                         cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
 
                         if (cellPersistence[idx] >= PERSISTENCE_FRAMES && changedPixels > maxChanged) {
@@ -262,6 +265,7 @@ function processFrame() {
                 }
 
                 if (pinSequence.length > 0 && lastPinTimestamp) {
+                    // 서버 렉 대기시간 2초(2000ms) 적용
                     if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2000)) {
                         isLocked = true;
                         statusText.innerText = `${pinSequence.length}개 순서확인.`;

@@ -210,12 +210,11 @@ function processFrame() {
             ctx.strokeStyle = "#00E676";
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
-
-            // 핀 인식 진행 중 망치 애니메이션에 의해 대기 상태로 강제 리셋되는 것을 방지 (0.50 -> 0.75)
-            if (changeRatio > 0.75 && pinSequence.length === 0) {
-                currentState = 'WAIT_OPEN';
-                statusText.innerText = "다음 제련 대기 중";
-            } else if (!isLocked) {
+if (changeRatio > 0.45) {
+    currentState = 'WAIT_OPEN';
+    resetStateData(); // 이전 순서 기록 리셋
+    statusText.innerText = "다음 제련 대기 중";
+} else if (!isLocked) {
                 const gridCells = getGridCells(roi.w, roi.h);
                 const now = Date.now();
 

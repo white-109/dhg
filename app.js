@@ -289,7 +289,7 @@ function processFrame() {
                 }
 
                 if (pinSequence.length > 0 && lastPinTimestamp) {
-                    if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2000)) {
+                    if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2500)) {
                         isLocked = true;
                         statusText.innerText = `${pinSequence.length}개 순서확인.`;
                     }

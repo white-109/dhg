@@ -22,11 +22,12 @@ let registeredCells = new Set();
 let cellPersistence = {};
 let pinSequence = [];
 let lastPinTimestamp = null;
+let detectingStartTime = null; // 감지 시작 시점 지연용
 let isLocked = false;
 
 const TOTAL_PINS = 6;
-const PERSISTENCE_FRAMES = 1; // 2 -> 1로 수정 (프레임 드랍 시 1프레임만 찍혀도 즉시 인식)
-const MIN_PIN_INTERVAL_MS = 80;  // 100 -> 80으로 수정 (빠른 연속 연산 대응)
+const PERSISTENCE_FRAMES = 1; 
+const MIN_PIN_INTERVAL_MS = 80; 
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -169,6 +170,8 @@ function processFrame() {
 
     if (roi && isBaseCaptured) {
         let src = cv.imread(canvas);
+        
+        // 1. Grayscale 픽셀 차이점 계산
         let srcGray = new cv.Mat();
         cv.cvtColor(src, srcGray, cv.COLOR_RGBA2GRAY);
 
@@ -180,6 +183,25 @@ function processFrame() {
 
         cv.absdiff(roiGray, baseGrayMat, diffMat);
         cv.threshold(diffMat, threshMat, 25, 255, cv.THRESH_BINARY);
+
+        // 2. HSV 채도(Saturation) 필터링 - 마우스 커서/무채색 잔상 제거
+        let srcRGB = new cv.Mat();
+        let srcHSV = new cv.Mat();
+        cv.cvtColor(src, srcRGB, cv.COLOR_RGBA2RGB);
+        cv.cvtColor(srcRGB, srcHSV, cv.COLOR_RGB2HSV);
+
+        let hsvPlanes = new cv.MatVector();
+        cv.split(srcHSV, hsvPlanes);
+        let satMat = hsvPlanes.get(1); // Saturation 채널
+        let roiSat = satMat.roi(rect);
+
+        let satThreshMat = new cv.Mat();
+        // 채도가 60 이상인 선명한 색상만 추출 (커서/배경 무시)
+        cv.threshold(roiSat, satThreshMat, 60, 255, cv.THRESH_BINARY);
+
+        // 3. 픽셀 차이점(threshMat)과 고채도 색상(satThreshMat)의 AND 연산
+        let finalThreshMat = new cv.Mat();
+        cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
 
         let totalChangedPixels = cv.countNonZero(threshMat);
         let changeRatio = totalChangedPixels / (roi.w * roi.h);
@@ -199,9 +221,9 @@ function processFrame() {
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            // 임계값을 0.08 -> 0.18로 완화하여 모루창이 열리자마자 1번 핀을 놓치지 않고 감지 모드로 빠르게 진입
             if (changeRatio < 0.18) {
                 currentState = 'DETECTING';
+                detectingStartTime = Date.now(); // 감지 시작 시간 기록
                 resetStateData();
                 statusText.innerText = "순서 감지중";
             }
@@ -210,14 +232,17 @@ function processFrame() {
             ctx.strokeStyle = "#00E676";
             ctx.lineWidth = 2;
             ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
-if (changeRatio > 0.45) {
-    currentState = 'WAIT_OPEN';
-    resetStateData(); // 이전 순서 기록 리셋
-    statusText.innerText = "다음 제련 대기 중";
-} else if (!isLocked) {
-                const gridCells = getGridCells(roi.w, roi.h);
-                const now = Date.now();
 
+            const now = Date.now();
+
+            if (changeRatio > 0.45) {
+                currentState = 'WAIT_OPEN';
+                resetStateData();
+                statusText.innerText = "다음 제련 대기 중";
+            } else if (!isLocked && (now - detectingStartTime >= 200)) { 
+                // 진입 후 0.2초(200ms) 지나야 감지 시작 (커서 치우는 시간 확보)
+                
+                const gridCells = getGridCells(roi.w, roi.h);
                 const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
 
                 let bestCandidate = null;
@@ -227,10 +252,10 @@ if (changeRatio > 0.45) {
                     if (registeredCells.has(idx) || pinSequence.length >= TOTAL_PINS) return;
 
                     let cellRect = new cv.Rect(cell.x, cell.y, cell.w, cell.h);
-                    let cellROI = threshMat.roi(cellRect);
+                    // finalThreshMat(채도 필터 적용본)을 기반으로 감지
+                    let cellROI = finalThreshMat.roi(cellRect);
                     let changedPixels = cv.countNonZero(cellROI);
 
-                    // 셀 민감도를 0.08 -> 0.04로 완화 (살짝 찍힌 핀도 놓치지 않음)
                     if (changedPixels > (cell.w * cell.h * 0.04)) {
                         cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
 
@@ -264,7 +289,6 @@ if (changeRatio > 0.45) {
                 }
 
                 if (pinSequence.length > 0 && lastPinTimestamp) {
-                    // 서버 렉 대기시간 2초(2000ms) 적용
                     if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2000)) {
                         isLocked = true;
                         statusText.innerText = `${pinSequence.length}개 순서확인.`;
@@ -273,6 +297,14 @@ if (changeRatio > 0.45) {
             }
         }
 
+        // OpenCV 메모리 해제
+        finalThreshMat.delete();
+        satThreshMat.delete();
+        roiSat.delete();
+        satMat.delete();
+        hsvPlanes.delete();
+        srcHSV.delete();
+        srcRGB.delete();
         diffMat.delete();
         threshMat.delete();
         roiGray.delete();

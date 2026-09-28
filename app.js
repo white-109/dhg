@@ -58,14 +58,35 @@ startBtn.addEventListener('click', async () => {
             canvas.height = video.videoHeight;
 
             const savedRoi = localStorage.getItem('anvil_roi_config');
-            if (savedRoi) {
+            const savedBaseImg = localStorage.getItem('anvil_base_img');
+
+            if (savedRoi && savedBaseImg) {
                 try {
                     const parsed = JSON.parse(savedRoi);
                     if (parsed && parsed.w > 40 && parsed.h > 40) {
                         roi = parsed;
-                        setTimeout(() => {
-                            captureBase();
-                        }, 300);
+                        const img = new Image();
+                        img.onload = () => {
+                            cropCanvas.width = roi.w;
+                            cropCanvas.height = roi.h;
+                            cropCtx.drawImage(img, 0, 0);
+
+                            let srcRoi = cv.imread(cropCanvas);
+                            let srcRGB = new cv.Mat();
+                            cv.cvtColor(srcRoi, srcRGB, cv.COLOR_RGBA2RGB);
+
+                            if (baseColorMat) baseColorMat.delete();
+                            baseColorMat = srcRGB.clone();
+                            isBaseCaptured = true;
+
+                            currentState = 'WAIT_CLOSE';
+                            resetStateData();
+                            statusText.innerText = "저장된 모루 로드 완료. 모루 창을 한번 닫아주세요.";
+
+                            srcRGB.delete();
+                            srcRoi.delete();
+                        };
+                        img.src = savedBaseImg;
                     }
                 } catch (e) {}
             }
@@ -135,7 +156,6 @@ canvas.addEventListener('mouseup', () => {
     if (isDragging) {
         isDragging = false;
         if (roi && roi.w > 40 && roi.h > 40) {
-            localStorage.setItem('anvil_roi_config', JSON.stringify(roi));
             captureBase();
         } else {
             roi = null;
@@ -150,6 +170,10 @@ function captureBase() {
     cropCanvas.width = roi.w;
     cropCanvas.height = roi.h;
     cropCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
+
+    const baseDataUrl = cropCanvas.toDataURL('image/png');
+    localStorage.setItem('anvil_roi_config', JSON.stringify(roi));
+    localStorage.setItem('anvil_base_img', baseDataUrl);
 
     let srcRoi = cv.imread(cropCanvas);
     let srcRGB = new cv.Mat();
@@ -196,7 +220,7 @@ function processFrame() {
         cv.cvtColor(diffRGB, diffGray, cv.COLOR_RGB2GRAY);
 
         let threshMat = new cv.Mat();
-        cv.threshold(diffGray, threshMat, 20, 255, cv.THRESH_BINARY);
+        cv.threshold(diffGray, threshMat, 35, 255, cv.THRESH_BINARY);
 
         let currentHSV = new cv.Mat();
         cv.cvtColor(currentRGB, currentHSV, cv.COLOR_RGB2HSV);
@@ -206,7 +230,7 @@ function processFrame() {
         let satMat = hsvPlanes.get(1);
 
         let satThreshMat = new cv.Mat();
-        cv.threshold(satMat, satThreshMat, 20, 255, cv.THRESH_BINARY);
+        cv.threshold(satMat, satThreshMat, 55, 255, cv.THRESH_BINARY);
 
         let finalThreshMat = new cv.Mat();
         cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
@@ -262,7 +286,7 @@ function processFrame() {
                     let cnt = contours.get(i);
                     let area = cv.contourArea(cnt);
 
-                    if (area > 30 && area < 3500) {
+                    if (area > 60 && area < 3500) {
                         let M = cv.moments(cnt, true);
                         if (M.m00 > 0) {
                             let rawCx = Math.round(M.m10 / M.m00) + roi.x;

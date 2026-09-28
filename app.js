@@ -9,7 +9,7 @@ const ctx = canvas.getContext('2d');
 const pipToggle = document.getElementById('pipToggle');
 const pipVideo = document.getElementById('pipVideo');
 
-// PIP 전용 가상 캔버스 (ROI 영역 줌인 렌더링)
+// PIP 전용 가상 캔버스
 const pipCanvas = document.createElement('canvas');
 const pipCtx = pipCanvas.getContext('2d');
 
@@ -32,7 +32,7 @@ let detectingStartTime = null;
 let isLocked = false;
 
 const TOTAL_PINS = 6;
-const MIN_PIN_INTERVAL_MS = 200;
+const MIN_PIN_INTERVAL_MS = 280; // 잔상 중복 감지 방지를 위한 쿨다운 (280ms)
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -241,6 +241,9 @@ function processFrame() {
                 let bestCandidate = null;
                 const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
 
+                const cellW = roi.w / 8;
+                const cellH = roi.h / 4;
+
                 for (let i = 0; i < contours.size(); ++i) {
                     let cnt = contours.get(i);
                     let area = cv.contourArea(cnt);
@@ -248,15 +251,24 @@ function processFrame() {
                     if (area > 30 && area < 3500) {
                         let M = cv.moments(cnt, true);
                         if (M.m00 > 0) {
-                            let cx = Math.round(M.m10 / M.m00) + roi.x;
-                            let cy = Math.round(M.m01 / M.m00) + roi.y;
+                            let rawCx = Math.round(M.m10 / M.m00) + roi.x;
+                            let rawCy = Math.round(M.m01 / M.m00) + roi.y;
 
+                            // 1. 감지된 파티클 위치가 몇 번째 칸(행/열)에 속하는지 계산
+                            let col = Math.min(7, Math.max(0, Math.floor((rawCx - roi.x) / cellW)));
+                            let row = Math.min(3, Math.max(0, Math.floor((rawCy - roi.y) / cellH)));
+
+                            // 2. 해당 칸의 정중앙 좌표로 보정
+                            let snappedX = Math.round(roi.x + (col + 0.5) * cellW);
+                            let snappedY = Math.round(roi.y + (row + 0.5) * cellH);
+
+                            // 3. 동일한 칸 중복 등록 방지
                             let isDuplicate = pinSequence.some(pin => {
-                                return Math.hypot(pin.x - cx, pin.y - cy) < 60;
+                                return Math.hypot(pin.x - snappedX, pin.y - snappedY) < Math.min(cellW, cellH) * 0.7;
                             });
 
                             if (!isDuplicate) {
-                                bestCandidate = { x: cx, y: cy };
+                                bestCandidate = { x: snappedX, y: snappedY };
                                 break;
                             }
                         }
@@ -299,7 +311,6 @@ function processFrame() {
 
     drawDetections(pinSequence);
 
-    // PIP 가상 캔버스에 줌인된 ROI 영역 복사
     if (roi && roi.w > 0 && roi.h > 0) {
         pipCanvas.width = roi.w;
         pipCanvas.height = roi.h;
@@ -320,9 +331,7 @@ function drawDetections(pins) {
 
     const now = Date.now();
 
-    // 1. 경로 선 및 흐르는 화살표 애니메이션 연출
     if (pins.length > 1) {
-        // 메인 초록색 연결선
         ctx.beginPath();
         ctx.moveTo(pins[0].x, pins[0].y);
         for (let i = 1; i < pins.length; i++) {
@@ -333,7 +342,6 @@ function drawDetections(pins) {
         ctx.lineJoin = "round";
         ctx.stroke();
 
-        // 흐르는 화살표 계산 (35px 간격으로 이동)
         const arrowSpacing = 32;
         const arrowSpeed = 0.045; 
         const offset = (now * arrowSpeed) % arrowSpacing;
@@ -353,7 +361,6 @@ function drawDetections(pins) {
             const uy = dy / dist;
 
             for (let d = offset; d < dist; d += arrowSpacing) {
-                // 노드 원 영역 바로 위는 화살표 생략 (깔끔한 UI 처리)
                 if (d < 22 || d > dist - 18) continue;
 
                 const ax = p1.x + ux * d;
@@ -363,7 +370,6 @@ function drawDetections(pins) {
                 ctx.translate(ax, ay);
                 ctx.rotate(angle);
 
-                // 흐르는 흰색 화살표 아웃라인그리기
                 ctx.beginPath();
                 ctx.moveTo(5, 0);
                 ctx.lineTo(-4, -4);
@@ -382,14 +388,12 @@ function drawDetections(pins) {
         }
     }
 
-    // 2. 노드 (동그라미 및 숫자) 그려주기
     pins.forEach((pin) => {
         const isStart = (pin.num === 1);
-        const radius = isStart ? 24 : 16; // 1번 시작 노드는 1.5배 (24px)
-        const fillColor = isStart ? "#FF1744" : "#00E676"; // 1번 노드는 쨍한 빨간색
+        const radius = isStart ? 24 : 16;
+        const fillColor = isStart ? "#FF1744" : "#00E676";
         const textColor = isStart ? "#FFFFFF" : "#000000";
 
-        // 1번 노드 전용 빨간색 은은한 후광(Glow) 효과
         if (isStart) {
             ctx.beginPath();
             ctx.arc(pin.x, pin.y, radius + 5, 0, Math.PI * 2);
@@ -397,7 +401,6 @@ function drawDetections(pins) {
             ctx.fill();
         }
 
-        // 기본 원 그리기
         ctx.beginPath();
         ctx.arc(pin.x, pin.y, radius, 0, Math.PI * 2);
         ctx.fillStyle = fillColor;
@@ -406,7 +409,6 @@ function drawDetections(pins) {
         ctx.strokeStyle = "#000000";
         ctx.stroke();
 
-        // 숫자 텍스트
         ctx.fillStyle = textColor;
         ctx.font = isStart ? "bold 22px sans-serif" : "bold 18px sans-serif";
         ctx.textAlign = "center";

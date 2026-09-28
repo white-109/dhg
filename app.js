@@ -9,6 +9,10 @@ const ctx = canvas.getContext('2d');
 const pipToggle = document.getElementById('pipToggle');
 const pipVideo = document.getElementById('pipVideo');
 
+// PIP 전용 가상 캔버스 생성 (ROI 크기만큼 확대되어 PIP 창에 전송됨)
+const pipCanvas = document.createElement('canvas');
+const pipCtx = pipCanvas.getContext('2d');
+
 const cropCanvas = document.createElement('canvas');
 const cropCtx = cropCanvas.getContext('2d');
 
@@ -64,7 +68,7 @@ startBtn.addEventListener('click', async () => {
 pipToggle.addEventListener('change', async () => {
     if (pipToggle.checked) {
         try {
-            const stream = canvas.captureStream(60);
+            const stream = pipCanvas.captureStream(60);
             pipVideo.srcObject = stream;
             await pipVideo.play();
             await pipVideo.requestPictureInPicture();
@@ -294,6 +298,19 @@ function processFrame() {
     }
 
     drawDetections(pinSequence);
+
+    // [PIP 전용 크롭 렌더링]
+    // 드래그한 영역(ROI)이 존재하면 해당 영역만 잘라내어 PIP 캔버스 전체 크기로 확대 복사
+    if (roi && roi.w > 0 && roi.h > 0) {
+        pipCanvas.width = roi.w;
+        pipCanvas.height = roi.h;
+        pipCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
+    } else {
+        pipCanvas.width = canvas.width || 640;
+        pipCanvas.height = canvas.height || 360;
+        pipCtx.drawImage(canvas, 0, 0);
+    }
+
     requestAnimationFrame(processFrame);
 }
 

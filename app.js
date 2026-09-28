@@ -196,10 +196,8 @@ function processFrame() {
         let roiSat = satMat.roi(rect);
 
         let satThreshMat = new cv.Mat();
-        // 채도가 60 이상인 선명한 색상만 추출 (커서/배경 무시)
         cv.threshold(roiSat, satThreshMat, 35, 255, cv.THRESH_BINARY);
 
-        // 3. 픽셀 차이점(threshMat)과 고채도 색상(satThreshMat)의 AND 연산
         let finalThreshMat = new cv.Mat();
         cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
 
@@ -240,7 +238,6 @@ function processFrame() {
                 resetStateData();
                 statusText.innerText = "다음 제련 대기 중";
             } else if (!isLocked && (now - detectingStartTime >= 200)) { 
-                // 진입 후 0.2초(200ms) 지나야 감지 시작 (커서 치우는 시간 확보)
                 
                 const gridCells = getGridCells(roi.w, roi.h);
                 const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
@@ -252,7 +249,6 @@ function processFrame() {
                     if (registeredCells.has(idx) || pinSequence.length >= TOTAL_PINS) return;
 
                     let cellRect = new cv.Rect(cell.x, cell.y, cell.w, cell.h);
-                    // finalThreshMat(채도 필터 적용본)을 기반으로 감지
                     let cellROI = finalThreshMat.roi(cellRect);
                     let changedPixels = cv.countNonZero(cellROI);
 
@@ -289,7 +285,7 @@ function processFrame() {
                 }
 
                 if (pinSequence.length > 0 && lastPinTimestamp) {
-                    if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2500)) {
+                    if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2000)) {
                         isLocked = true;
                         statusText.innerText = `${pinSequence.length}개 끝`;
                     }

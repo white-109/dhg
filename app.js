@@ -9,7 +9,7 @@ const ctx = canvas.getContext('2d');
 const pipToggle = document.getElementById('pipToggle');
 const pipVideo = document.getElementById('pipVideo');
 
-// PIP 전용 가상 캔버스 생성 (ROI 크기만큼 확대되어 PIP 창에 전송됨)
+// PIP 전용 가상 캔버스 (ROI 영역 줌인 렌더링)
 const pipCanvas = document.createElement('canvas');
 const pipCtx = pipCanvas.getContext('2d');
 
@@ -32,7 +32,7 @@ let detectingStartTime = null;
 let isLocked = false;
 
 const TOTAL_PINS = 6;
-const MIN_PIN_INTERVAL_MS = 80;
+const MIN_PIN_INTERVAL_MS = 200;
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -252,7 +252,7 @@ function processFrame() {
                             let cy = Math.round(M.m01 / M.m00) + roi.y;
 
                             let isDuplicate = pinSequence.some(pin => {
-                                return Math.hypot(pin.x - cx, pin.y - cy) < 30;
+                                return Math.hypot(pin.x - cx, pin.y - cy) < 60;
                             });
 
                             if (!isDuplicate) {
@@ -299,8 +299,7 @@ function processFrame() {
 
     drawDetections(pinSequence);
 
-    // [PIP 전용 크롭 렌더링]
-    // 드래그한 영역(ROI)이 존재하면 해당 영역만 잘라내어 PIP 캔버스 전체 크기로 확대 복사
+    // PIP 가상 캔버스에 줌인된 ROI 영역 복사
     if (roi && roi.w > 0 && roi.h > 0) {
         pipCanvas.width = roi.w;
         pipCanvas.height = roi.h;
@@ -319,29 +318,97 @@ function drawDetections(pins) {
 
     pins.sort((a, b) => a.num - b.num);
 
+    const now = Date.now();
+
+    // 1. 경로 선 및 흐르는 화살표 애니메이션 연출
     if (pins.length > 1) {
+        // 메인 초록색 연결선
         ctx.beginPath();
         ctx.moveTo(pins[0].x, pins[0].y);
         for (let i = 1; i < pins.length; i++) {
             ctx.lineTo(pins[i].x, pins[i].y);
         }
-        ctx.strokeStyle = "#00FF66";
-        ctx.lineWidth = 5;
+        ctx.strokeStyle = "rgba(0, 230, 118, 0.8)";
+        ctx.lineWidth = 4;
         ctx.lineJoin = "round";
         ctx.stroke();
+
+        // 흐르는 화살표 계산 (35px 간격으로 이동)
+        const arrowSpacing = 32;
+        const arrowSpeed = 0.045; 
+        const offset = (now * arrowSpeed) % arrowSpacing;
+
+        for (let i = 0; i < pins.length - 1; i++) {
+            const p1 = pins[i];
+            const p2 = pins[i + 1];
+
+            const dx = p2.x - p1.x;
+            const dy = p2.y - p1.y;
+            const dist = Math.hypot(dx, dy);
+
+            if (dist === 0) continue;
+
+            const angle = Math.atan2(dy, dx);
+            const ux = dx / dist;
+            const uy = dy / dist;
+
+            for (let d = offset; d < dist; d += arrowSpacing) {
+                // 노드 원 영역 바로 위는 화살표 생략 (깔끔한 UI 처리)
+                if (d < 22 || d > dist - 18) continue;
+
+                const ax = p1.x + ux * d;
+                const ay = p1.y + uy * d;
+
+                ctx.save();
+                ctx.translate(ax, ay);
+                ctx.rotate(angle);
+
+                // 흐르는 흰색 화살표 아웃라인그리기
+                ctx.beginPath();
+                ctx.moveTo(5, 0);
+                ctx.lineTo(-4, -4);
+                ctx.lineTo(-2, 0);
+                ctx.lineTo(-4, 4);
+                ctx.closePath();
+
+                ctx.fillStyle = "#FFFFFF";
+                ctx.fill();
+                ctx.strokeStyle = "#000000";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                ctx.restore();
+            }
+        }
     }
 
+    // 2. 노드 (동그라미 및 숫자) 그려주기
     pins.forEach((pin) => {
+        const isStart = (pin.num === 1);
+        const radius = isStart ? 24 : 16; // 1번 시작 노드는 1.5배 (24px)
+        const fillColor = isStart ? "#FF1744" : "#00E676"; // 1번 노드는 쨍한 빨간색
+        const textColor = isStart ? "#FFFFFF" : "#000000";
+
+        // 1번 노드 전용 빨간색 은은한 후광(Glow) 효과
+        if (isStart) {
+            ctx.beginPath();
+            ctx.arc(pin.x, pin.y, radius + 5, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(255, 23, 68, 0.35)";
+            ctx.fill();
+        }
+
+        // 기본 원 그리기
         ctx.beginPath();
-        ctx.arc(pin.x, pin.y, 16, 0, Math.PI * 2);
-        ctx.fillStyle = "#00E676";
+        ctx.arc(pin.x, pin.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = fillColor;
         ctx.fill();
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.5;
         ctx.strokeStyle = "#000000";
         ctx.stroke();
 
-        ctx.fillStyle = "#000000";
-        ctx.font = "bold 18px sans-serif";
+        // 숫자 텍스트
+        ctx.fillStyle = textColor;
+        ctx.font = isStart ? "bold 22px sans-serif" : "bold 18px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(pin.num, pin.x, pin.y);

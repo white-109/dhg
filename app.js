@@ -110,10 +110,10 @@ canvas.addEventListener('mouseup', () => {
 function getGridCells(roiW, roiH) {
     const cells = [];
     const rowConfig = [
-        { row: 0, cols: 8, offset: 3 },
+        { row: 0, cols: 6, offset: 2 },
         { row: 1, cols: 8, offset: 0 },
         { row: 2, cols: 8, offset: 0 },
-        { row: 3, cols: 8, offset: 3 }
+        { row: 3, cols: 6, offset: 2 }
     ];
 
     const cellW = roiW / 8;

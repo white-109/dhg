@@ -9,7 +9,6 @@ const ctx = canvas.getContext('2d');
 const pipToggle = document.getElementById('pipToggle');
 const pipVideo = document.getElementById('pipVideo');
 
-// PIP 전용 가상 캔버스
 const pipCanvas = document.createElement('canvas');
 const pipCtx = pipCanvas.getContext('2d');
 
@@ -32,7 +31,7 @@ let detectingStartTime = null;
 let isLocked = false;
 
 const TOTAL_PINS = 6;
-const MIN_PIN_INTERVAL_MS = 280; // 잔상 중복 감지 방지를 위한 쿨다운 (280ms)
+const MIN_PIN_INTERVAL_MS = 280;
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -57,6 +56,20 @@ startBtn.addEventListener('click', async () => {
         video.addEventListener('loadedmetadata', () => {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
+
+            const savedRoi = localStorage.getItem('anvil_roi_config');
+            if (savedRoi) {
+                try {
+                    const parsed = JSON.parse(savedRoi);
+                    if (parsed && parsed.w > 40 && parsed.h > 40) {
+                        roi = parsed;
+                        setTimeout(() => {
+                            captureBase();
+                        }, 300);
+                    }
+                } catch (e) {}
+            }
+
             requestAnimationFrame(processFrame);
         });
 
@@ -122,6 +135,7 @@ canvas.addEventListener('mouseup', () => {
     if (isDragging) {
         isDragging = false;
         if (roi && roi.w > 40 && roi.h > 40) {
+            localStorage.setItem('anvil_roi_config', JSON.stringify(roi));
             captureBase();
         } else {
             roi = null;
@@ -254,15 +268,12 @@ function processFrame() {
                             let rawCx = Math.round(M.m10 / M.m00) + roi.x;
                             let rawCy = Math.round(M.m01 / M.m00) + roi.y;
 
-                            // 1. 감지된 파티클 위치가 몇 번째 칸(행/열)에 속하는지 계산
                             let col = Math.min(7, Math.max(0, Math.floor((rawCx - roi.x) / cellW)));
                             let row = Math.min(3, Math.max(0, Math.floor((rawCy - roi.y) / cellH)));
 
-                            // 2. 해당 칸의 정중앙 좌표로 보정
                             let snappedX = Math.round(roi.x + (col + 0.5) * cellW);
                             let snappedY = Math.round(roi.y + (row + 0.5) * cellH);
 
-                            // 3. 동일한 칸 중복 등록 방지
                             let isDuplicate = pinSequence.some(pin => {
                                 return Math.hypot(pin.x - snappedX, pin.y - snappedY) < Math.min(cellW, cellH) * 0.7;
                             });
@@ -410,7 +421,7 @@ function drawDetections(pins) {
         ctx.stroke();
 
         ctx.fillStyle = textColor;
-        ctx.font = isStart ? "bold 22px sans-serif" : "bold 18px sans-serif";
+        ctx.font = isStart ? "bold 20px sans-serif" : "bold 18px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(pin.num, pin.x, pin.y);

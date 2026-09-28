@@ -36,7 +36,6 @@
             align-items: center;
             justify-content: center;
         }
-        /* 동영상 크기 고정 및 비율 유지 설정 */
         .guide-video {
             width: 100%;
             max-width: 320px;
@@ -84,8 +83,6 @@
             cursor: not-allowed;
         }
         .btn:hover:not(:disabled) { background-color: #45a049; }
-        .btn-reset { background-color: #f44336; }
-        .btn-reset:hover { background-color: #da190b; }
 
         .contact-box {
             flex: 1;
@@ -140,7 +137,6 @@
 
     <div class="top-container">
         <div class="video-box">
-            <!-- class명을 CSS와 동일하게 guide-video로 통일 -->
             <video class="guide-video" controls preload="metadata">
                 <source src="G.mp4" type="video/mp4">
                 브라우저가 동영상 재생을 지원하지 않습니다.
@@ -154,7 +150,10 @@
                    <b>1. 화면 공유 2. 마인크래프트 창 선택 3. 제련하기 후 빈 모루를 사이트에서 드래그후 제련해주세요.</b>
                 </p>
                 <button id="startBtn" class="btn" disabled>엔진 로딩 중</button>
-                <button id="resetBtn" class="btn btn-reset">초기화 (Space / R)</button>
+                <label style="margin-left: 15px; font-weight: bold; cursor: pointer; user-select: none;">
+                    <input type="checkbox" id="pipToggle" style="transform: scale(1.2); vertical-align: middle; cursor: pointer;">
+                    <span style="vertical-align: middle; margin-left: 4px;">PIP 모드</span>
+                </label>
             </div>
         </div>
 
@@ -164,6 +163,8 @@
             <p>디스코드 : <b>white.109</b></p>
         </div>
     </div>
+
+    <video id="pipVideo" autoplay muted playsinline style="display: none;"></video>
 
     <div class="status-text" id="status">OpenCV.js 연산 엔진을 초기화하는 중입니다</div>
 

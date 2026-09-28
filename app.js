@@ -8,7 +8,6 @@ const video = document.getElementById('webcamVideo');
 const canvas = document.getElementById('outputCanvas');
 const ctx = canvas.getContext('2d');
 
-// ROI 전용 연산용 오프스크린 가상 캐버스 (성능 최적화 핵심)
 const cropCanvas = document.createElement('canvas');
 const cropCtx = cropCanvas.getContext('2d');
 
@@ -17,10 +16,10 @@ let isDragging = false;
 let startX = 0, startY = 0;
 let currentX = 0, currentY = 0;
 
-let baseColorMat = null; // 흑백 대신 RGB 컬러 기준 이미지 저장
+let baseColorMat = null;
 let isBaseCaptured = false;
 
-let currentState = 'IDLE'; // IDLE -> WAIT_CLOSE -> WAIT_OPEN -> DETECTING
+let currentState = 'IDLE';
 
 let registeredCells = new Set();
 let cellPersistence = {};
@@ -173,14 +172,12 @@ function processFrame() {
     }
 
     if (roi && isBaseCaptured) {
-        // [성능 최적화] ROI 영역만 자른 가상 캔버스에서 읽어옴 (속도 20배 향상)
         cropCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
         let roiMat = cv.imread(cropCanvas);
 
         let currentRGB = new cv.Mat();
         cv.cvtColor(roiMat, currentRGB, cv.COLOR_RGBA2RGB);
 
-        // 1. RGB 컬러 차이점 계산 (주황/노란색 배경 오인식 해결)
         let diffRGB = new cv.Mat();
         cv.absdiff(currentRGB, baseColorMat, diffRGB);
 
@@ -190,7 +187,6 @@ function processFrame() {
         let threshMat = new cv.Mat();
         cv.threshold(diffGray, threshMat, 20, 255, cv.THRESH_BINARY);
 
-        // 2. HSV 채도(Saturation) 필터링 - 마우스 커서 제거
         let currentHSV = new cv.Mat();
         cv.cvtColor(currentRGB, currentHSV, cv.COLOR_RGB2HSV);
 
@@ -201,7 +197,6 @@ function processFrame() {
         let satThreshMat = new cv.Mat();
         cv.threshold(satMat, satThreshMat, 20, 255, cv.THRESH_BINARY);
 
-        // 3. RGB 차이점과 HSV 채도 필터의 AND 연산
         let finalThreshMat = new cv.Mat();
         cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
 

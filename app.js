@@ -197,7 +197,7 @@ function processFrame() {
 
         let satThreshMat = new cv.Mat();
         // 채도가 60 이상인 선명한 색상만 추출 (커서/배경 무시)
-        cv.threshold(roiSat, satThreshMat, 60, 255, cv.THRESH_BINARY);
+        cv.threshold(roiSat, satThreshMat, 35, 255, cv.THRESH_BINARY);
 
         // 3. 픽셀 차이점(threshMat)과 고채도 색상(satThreshMat)의 AND 연산
         let finalThreshMat = new cv.Mat();

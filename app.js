@@ -2,11 +2,12 @@ let isOpenCvReady = false;
 let isStreaming = false;
 
 const startBtn = document.getElementById('startBtn');
-const resetBtn = document.getElementById('resetBtn');
 const statusText = document.getElementById('status');
 const video = document.getElementById('webcamVideo');
 const canvas = document.getElementById('outputCanvas');
 const ctx = canvas.getContext('2d');
+const pipToggle = document.getElementById('pipToggle');
+const pipVideo = document.getElementById('pipVideo');
 
 const cropCanvas = document.createElement('canvas');
 const cropCtx = cropCanvas.getContext('2d');
@@ -21,16 +22,13 @@ let isBaseCaptured = false;
 
 let currentState = 'IDLE';
 
-let registeredCells = new Set();
-let cellPersistence = {};
 let pinSequence = [];
 let lastPinTimestamp = null;
 let detectingStartTime = null;
 let isLocked = false;
 
 const TOTAL_PINS = 6;
-const PERSISTENCE_FRAMES = 1; 
-const MIN_PIN_INTERVAL_MS = 80; 
+const MIN_PIN_INTERVAL_MS = 80;
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -61,6 +59,27 @@ startBtn.addEventListener('click', async () => {
     } catch (err) {
         statusText.innerText = "화면 공유 취소";
     }
+});
+
+pipToggle.addEventListener('change', async () => {
+    if (pipToggle.checked) {
+        try {
+            const stream = canvas.captureStream(60);
+            pipVideo.srcObject = stream;
+            await pipVideo.play();
+            await pipVideo.requestPictureInPicture();
+        } catch (err) {
+            pipToggle.checked = false;
+        }
+    } else {
+        if (document.pictureInPictureElement) {
+            await document.exitPictureInPicture();
+        }
+    }
+});
+
+pipVideo.addEventListener('leavepictureinpicture', () => {
+    pipToggle.checked = false;
 });
 
 canvas.addEventListener('mousedown', (e) => {
@@ -107,34 +126,6 @@ canvas.addEventListener('mouseup', () => {
     }
 });
 
-function getGridCells(roiW, roiH) {
-    const cells = [];
-    const rowConfig = [
-        { row: 0, cols: 6, offset: 2 },
-        { row: 1, cols: 8, offset: 0 },
-        { row: 2, cols: 8, offset: 0 },
-        { row: 3, cols: 6, offset: 2 }
-    ];
-
-    const cellW = roiW / 8;
-    const cellH = roiH / 4;
-
-    rowConfig.forEach(cfg => {
-        for (let c = 0; c < cfg.cols; c++) {
-            const colIdx = cfg.offset + c;
-            cells.push({
-                x: Math.round(colIdx * cellW + cellW * 0.225),
-                y: Math.round(cfg.row * cellH + cellH * 0.225),
-                w: Math.round(cellW * 0.55),
-                h: Math.round(cellH * 0.55),
-                cellW: cellW,
-                cellH: cellH
-            });
-        }
-    });
-    return cells;
-}
-
 function captureBase() {
     if (!roi) return;
 
@@ -172,6 +163,8 @@ function processFrame() {
     }
 
     if (roi && isBaseCaptured) {
+        cropCanvas.width = roi.w;
+        cropCanvas.height = roi.h;
         cropCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
         let roiMat = cv.imread(cropCanvas);
 
@@ -236,50 +229,47 @@ function processFrame() {
                 currentState = 'WAIT_OPEN';
                 resetStateData();
                 statusText.innerText = "다음 제련 대기 중";
-            } else if (!isLocked && (now - detectingStartTime >= 200)) { 
-                const gridCells = getGridCells(roi.w, roi.h);
-                const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
+            } else if (!isLocked && (now - detectingStartTime >= 200)) {
+                let contours = new cv.MatVector();
+                let hierarchy = new cv.Mat();
+                cv.findContours(finalThreshMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                 let bestCandidate = null;
-                let maxChanged = 0;
+                const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
 
-                gridCells.forEach((cell, idx) => {
-                    if (registeredCells.has(idx) || pinSequence.length >= TOTAL_PINS) return;
+                for (let i = 0; i < contours.size(); ++i) {
+                    let cnt = contours.get(i);
+                    let area = cv.contourArea(cnt);
 
-                    let cellRect = new cv.Rect(cell.x, cell.y, cell.w, cell.h);
-                    let cellROI = finalThreshMat.roi(cellRect);
-                    let changedPixels = cv.countNonZero(cellROI);
+                    if (area > 30 && area < 3500) {
+                        let M = cv.moments(cnt, true);
+                        if (M.m00 > 0) {
+                            let cx = Math.round(M.m10 / M.m00) + roi.x;
+                            let cy = Math.round(M.m01 / M.m00) + roi.y;
 
-                    if (changedPixels > (cell.w * cell.h * 0.04)) {
-                        cellPersistence[idx] = (cellPersistence[idx] || 0) + 1;
+                            let isDuplicate = pinSequence.some(pin => {
+                                return Math.hypot(pin.x - cx, pin.y - cy) < 30;
+                            });
 
-                        if (cellPersistence[idx] >= PERSISTENCE_FRAMES && changedPixels > maxChanged) {
-                            let M = cv.moments(cellROI, true);
-                            let centerX = (M.m00 > 0) ? Math.round(M.m10 / M.m00) : Math.round(cell.w / 2);
-                            let centerY = (M.m00 > 0) ? Math.round(M.m01 / M.m00) : Math.round(cell.h / 2);
-
-                            maxChanged = changedPixels;
-                            bestCandidate = {
-                                idx: idx,
-                                x: roi.x + cell.x + centerX,
-                                y: roi.y + cell.y + centerY
-                            };
+                            if (!isDuplicate) {
+                                bestCandidate = { x: cx, y: cy };
+                                break;
+                            }
                         }
-                    } else {
-                        cellPersistence[idx] = 0;
                     }
-                    cellROI.delete();
-                });
+                }
 
-                if (bestCandidate && isCooldownReady) {
-                    registeredCells.add(bestCandidate.idx);
+                contours.delete();
+                hierarchy.delete();
+
+                if (bestCandidate && isCooldownReady && pinSequence.length < TOTAL_PINS) {
                     pinSequence.push({
                         num: pinSequence.length + 1,
                         x: bestCandidate.x,
                         y: bestCandidate.y
                     });
                     lastPinTimestamp = now;
-                    statusText.innerText = ` ${pinSequence.length}번 순서 확인`;
+                    statusText.innerText = `${pinSequence.length}번 순서 확인`;
                 }
 
                 if (pinSequence.length > 0 && lastPinTimestamp) {
@@ -291,7 +281,6 @@ function processFrame() {
             }
         }
 
-        // OpenCV 메모리 해제
         finalThreshMat.delete();
         satThreshMat.delete();
         satMat.delete();
@@ -343,24 +332,7 @@ function drawDetections(pins) {
 }
 
 function resetStateData() {
-    registeredCells.clear();
-    cellPersistence = {};
     pinSequence = [];
     lastPinTimestamp = null;
     isLocked = false;
 }
-
-function fullReset() {
-    if (baseColorMat) {
-        baseColorMat.delete();
-        baseColorMat = null;
-    }
-    roi = null;
-    isBaseCaptured = false;
-    currentState = 'IDLE';
-    resetStateData();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    statusText.innerText = "제련하기 후 순서가 모두 지나간 빈 모루를 드래그해주세요.";
-}
-
-resetBtn.addEventListener('click', fullReset);

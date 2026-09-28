@@ -390,7 +390,7 @@ function drawDetections(pins) {
 
     pins.forEach((pin) => {
         const isStart = (pin.num === 1);
-        const radius = isStart ? 24 : 16;
+        const radius = isStart ? 20 : 16;
         const fillColor = isStart ? "#FF1744" : "#00E676";
         const textColor = isStart ? "#FFFFFF" : "#000000";
 

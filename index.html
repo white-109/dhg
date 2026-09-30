@@ -66,17 +66,23 @@
             width: 100%;
             box-shadow: 0 4px 6px rgba(0,0,0,0.3);
         }
+        .control-row {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+            margin-top: 10px;
+        }
         .btn {
             background-color: #4CAF50;
             color: white;
             border: none;
-            padding: 12px 20px;
+            padding: 10px 18px;
             font-size: 15px;
             font-weight: bold;
             border-radius: 6px;
             cursor: pointer;
             transition: 0.2s;
-            margin: 5px;
         }
         .btn:disabled {
             background-color: #555555;
@@ -149,11 +155,22 @@
                 <p style="margin: 0 0 10px 0; font-size: 14px;">
                    <b>1. 화면 공유 2. 마인크래프트 창 선택 3. 제련하기 후 빈 모루를 사이트에서 드래그후 제련해주세요.</b>
                 </p>
-                <button id="startBtn" class="btn" disabled>엔진 로딩 중</button>
-                <label style="margin-left: 15px; font-weight: bold; cursor: pointer; user-select: none;">
-                    <input type="checkbox" id="pipToggle" style="transform: scale(1.2); vertical-align: middle; cursor: pointer;">
-                    <span style="vertical-align: middle; margin-left: 4px;">PIP 모드</span>
-                </label>
+                
+                <div class="control-row">
+                    <button id="startBtn" class="btn" disabled>엔진 로딩 중</button>
+                    <label style="font-weight: bold; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="pipToggle" style="transform: scale(1.2); vertical-align: middle; cursor: pointer;">
+                        <span style="vertical-align: middle; margin-left: 4px;">PIP 모드</span>
+                    </label>
+                </div>
+
+                <div class="control-row" style="margin-top: 12px;">
+                    <label style="font-weight: bold; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px;">
+                        <span>순서크기:</span>
+                        <input type="range" id="pxSlider" min="8" max="30" value="12" style="cursor: pointer; width: 100px;">
+                        <span id="pxValueText" style="min-width: 35px; text-align: left;">12px</span>
+                    </label>
+                </div>
             </div>
         </div>
 

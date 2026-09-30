@@ -33,11 +33,12 @@ let detectingStartTime = null;
 let isLocked = false;
 
 const TOTAL_PINS = 6;
-const MIN_PIN_INTERVAL_MS = 280;
-const DUPLICATE_DIST_PX = 28;
+const MIN_PIN_INTERVAL_MS = 250;
+const DUPLICATE_DIST_PX = 38; // 중복 핀 생성 방지 거리
 
 let customRadiusPx = parseInt(localStorage.getItem('anvil_radius_px')) || 12;
 
+// 슬라이더 조절 이벤트
 if (pxSlider) {
     pxSlider.value = customRadiusPx;
     if (pxValueText) pxValueText.innerText = customRadiusPx + 'px';
@@ -228,6 +229,7 @@ function processFrame() {
         let currentRGB = new cv.Mat();
         cv.cvtColor(roiMat, currentRGB, cv.COLOR_RGBA2RGB);
 
+        // 1. 프레임 차분
         let diffRGB = new cv.Mat();
         cv.absdiff(currentRGB, baseColorMat, diffRGB);
 
@@ -237,6 +239,7 @@ function processFrame() {
         let threshMat = new cv.Mat();
         cv.threshold(diffGray, threshMat, 35, 255, cv.THRESH_BINARY);
 
+        // 2. 채도 필터링
         let currentHSV = new cv.Mat();
         cv.cvtColor(currentRGB, currentHSV, cv.COLOR_RGB2HSV);
 
@@ -245,7 +248,7 @@ function processFrame() {
         let satMat = hsvPlanes.get(1);
 
         let satThreshMat = new cv.Mat();
-        cv.threshold(satMat, satThreshMat, 50, 255, cv.THRESH_BINARY);
+        cv.threshold(satMat, satThreshMat, 40, 255, cv.THRESH_BINARY);
 
         let finalThreshMat = new cv.Mat();
         cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
@@ -292,13 +295,15 @@ function processFrame() {
                 cv.findContours(finalThreshMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                 let bestCandidate = null;
+                let maxArea = 0;
                 const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
 
+                // 해당 프레임에서 가장 뚜렷하고 면적이 큰 이펙트 덩어리 단 1개만 추출
                 for (let i = 0; i < contours.size(); ++i) {
                     let cnt = contours.get(i);
                     let area = cv.contourArea(cnt);
 
-                    if (area > 40 && area < 4000) {
+                    if (area > 50 && area < 5000) {
                         let M = cv.moments(cnt, true);
                         if (M.m00 > 0) {
                             let cx = Math.round(M.m10 / M.m00) + roi.x;
@@ -308,9 +313,9 @@ function processFrame() {
                                 return Math.hypot(pin.x - cx, pin.y - cy) < DUPLICATE_DIST_PX;
                             });
 
-                            if (!isDuplicate) {
+                            if (!isDuplicate && area > maxArea) {
+                                maxArea = area;
                                 bestCandidate = { x: cx, y: cy };
-                                break;
                             }
                         }
                     }

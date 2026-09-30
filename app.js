@@ -8,6 +8,8 @@ const canvas = document.getElementById('outputCanvas');
 const ctx = canvas.getContext('2d');
 const pipToggle = document.getElementById('pipToggle');
 const pipVideo = document.getElementById('pipVideo');
+const pxSlider = document.getElementById('pxSlider');
+const pxValueText = document.getElementById('pxValueText');
 
 const pipCanvas = document.createElement('canvas');
 const pipCtx = pipCanvas.getContext('2d');
@@ -32,6 +34,19 @@ let isLocked = false;
 
 const TOTAL_PINS = 6;
 const MIN_PIN_INTERVAL_MS = 280;
+const DUPLICATE_DIST_PX = 28;
+
+let customRadiusPx = parseInt(localStorage.getItem('anvil_radius_px')) || 12;
+
+if (pxSlider) {
+    pxSlider.value = customRadiusPx;
+    if (pxValueText) pxValueText.innerText = customRadiusPx + 'px';
+    pxSlider.addEventListener('input', (e) => {
+        customRadiusPx = parseInt(e.target.value);
+        if (pxValueText) pxValueText.innerText = customRadiusPx + 'px';
+        localStorage.setItem('anvil_radius_px', customRadiusPx);
+    });
+}
 
 function onOpenCvReady() {
     isOpenCvReady = true;
@@ -42,7 +57,7 @@ function onOpenCvReady() {
 startBtn.addEventListener('click', async () => {
     try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
-            video: { frameRate: { ideal: 60, max: 60 } },
+            video: { frameRate: { ideal: 30, max: 30 } },
             audio: false
         });
 
@@ -63,7 +78,7 @@ startBtn.addEventListener('click', async () => {
             if (savedRoi && savedBaseImg) {
                 try {
                     const parsed = JSON.parse(savedRoi);
-                    if (parsed && parsed.w > 40 && parsed.h > 40) {
+                    if (parsed && parsed.w > 30 && parsed.h > 30) {
                         roi = parsed;
                         const img = new Image();
                         img.onload = () => {
@@ -102,7 +117,7 @@ startBtn.addEventListener('click', async () => {
 pipToggle.addEventListener('change', async () => {
     if (pipToggle.checked) {
         try {
-            const stream = pipCanvas.captureStream(60);
+            const stream = pipCanvas.captureStream(30);
             pipVideo.srcObject = stream;
             await pipVideo.play();
             await pipVideo.requestPictureInPicture();
@@ -155,7 +170,7 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseup', () => {
     if (isDragging) {
         isDragging = false;
-        if (roi && roi.w > 40 && roi.h > 40) {
+        if (roi && roi.w > 30 && roi.h > 30) {
             captureBase();
         } else {
             roi = null;
@@ -230,7 +245,7 @@ function processFrame() {
         let satMat = hsvPlanes.get(1);
 
         let satThreshMat = new cv.Mat();
-        cv.threshold(satMat, satThreshMat, 55, 255, cv.THRESH_BINARY);
+        cv.threshold(satMat, satThreshMat, 50, 255, cv.THRESH_BINARY);
 
         let finalThreshMat = new cv.Mat();
         cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
@@ -279,31 +294,22 @@ function processFrame() {
                 let bestCandidate = null;
                 const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
 
-                const cellW = roi.w / 8;
-                const cellH = roi.h / 4;
-
                 for (let i = 0; i < contours.size(); ++i) {
                     let cnt = contours.get(i);
                     let area = cv.contourArea(cnt);
 
-                    if (area > 60 && area < 3500) {
+                    if (area > 40 && area < 4000) {
                         let M = cv.moments(cnt, true);
                         if (M.m00 > 0) {
-                            let rawCx = Math.round(M.m10 / M.m00) + roi.x;
-                            let rawCy = Math.round(M.m01 / M.m00) + roi.y;
-
-                            let col = Math.min(7, Math.max(0, Math.floor((rawCx - roi.x) / cellW)));
-                            let row = Math.min(3, Math.max(0, Math.floor((rawCy - roi.y) / cellH)));
-
-                            let snappedX = Math.round(roi.x + (col + 0.5) * cellW);
-                            let snappedY = Math.round(roi.y + (row + 0.5) * cellH);
+                            let cx = Math.round(M.m10 / M.m00) + roi.x;
+                            let cy = Math.round(M.m01 / M.m00) + roi.y;
 
                             let isDuplicate = pinSequence.some(pin => {
-                                return Math.hypot(pin.x - snappedX, pin.y - snappedY) < Math.min(cellW, cellH) * 0.7;
+                                return Math.hypot(pin.x - cx, pin.y - cy) < DUPLICATE_DIST_PX;
                             });
 
                             if (!isDuplicate) {
-                                bestCandidate = { x: snappedX, y: snappedY };
+                                bestCandidate = { x: cx, y: cy };
                                 break;
                             }
                         }
@@ -361,10 +367,12 @@ function processFrame() {
 
 function drawDetections(pins) {
     if (pins.length === 0 || currentState !== 'DETECTING') return;
+    if (!roi || !roi.w || !roi.h) return;
 
     pins.sort((a, b) => a.num - b.num);
 
     const now = Date.now();
+    const baseRadius = customRadiusPx;
 
     if (pins.length > 1) {
         ctx.beginPath();
@@ -373,11 +381,11 @@ function drawDetections(pins) {
             ctx.lineTo(pins[i].x, pins[i].y);
         }
         ctx.strokeStyle = "rgba(0, 230, 118, 0.8)";
-        ctx.lineWidth = 4;
+        ctx.lineWidth = Math.max(2, baseRadius * 0.2);
         ctx.lineJoin = "round";
         ctx.stroke();
 
-        const arrowSpacing = 32;
+        const arrowSpacing = Math.max(16, baseRadius * 1.6);
         const arrowSpeed = 0.045; 
         const offset = (now * arrowSpeed) % arrowSpacing;
 
@@ -396,7 +404,7 @@ function drawDetections(pins) {
             const uy = dy / dist;
 
             for (let d = offset; d < dist; d += arrowSpacing) {
-                if (d < 22 || d > dist - 18) continue;
+                if (d < baseRadius || d > dist - baseRadius) continue;
 
                 const ax = p1.x + ux * d;
                 const ay = p1.y + uy * d;
@@ -406,10 +414,10 @@ function drawDetections(pins) {
                 ctx.rotate(angle);
 
                 ctx.beginPath();
-                ctx.moveTo(5, 0);
-                ctx.lineTo(-4, -4);
-                ctx.lineTo(-2, 0);
-                ctx.lineTo(-4, 4);
+                ctx.moveTo(4, 0);
+                ctx.lineTo(-3, -3);
+                ctx.lineTo(-1, 0);
+                ctx.lineTo(-3, 3);
                 ctx.closePath();
 
                 ctx.fillStyle = "#FFFFFF";
@@ -425,13 +433,14 @@ function drawDetections(pins) {
 
     pins.forEach((pin) => {
         const isStart = (pin.num === 1);
-        const radius = isStart ? 20 : 16;
+        const radius = isStart ? baseRadius * 1.25 : baseRadius;
         const fillColor = isStart ? "#FF1744" : "#00E676";
         const textColor = isStart ? "#FFFFFF" : "#000000";
+        const fontSize = Math.max(9, Math.round(radius * 1.05));
 
         if (isStart) {
             ctx.beginPath();
-            ctx.arc(pin.x, pin.y, radius + 5, 0, Math.PI * 2);
+            ctx.arc(pin.x, pin.y, radius + (baseRadius * 0.25), 0, Math.PI * 2);
             ctx.fillStyle = "rgba(255, 23, 68, 0.35)";
             ctx.fill();
         }
@@ -440,12 +449,12 @@ function drawDetections(pins) {
         ctx.arc(pin.x, pin.y, radius, 0, Math.PI * 2);
         ctx.fillStyle = fillColor;
         ctx.fill();
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = Math.max(1.5, radius * 0.12);
         ctx.strokeStyle = "#000000";
         ctx.stroke();
 
         ctx.fillStyle = textColor;
-        ctx.font = isStart ? "bold 20px sans-serif" : "bold 18px sans-serif";
+        ctx.font = `bold ${fontSize}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(pin.num, pin.x, pin.y);

@@ -34,11 +34,10 @@ let isLocked = false;
 
 const TOTAL_PINS = 6;
 const MIN_PIN_INTERVAL_MS = 250;
-const DUPLICATE_DIST_PX = 38; // 중복 핀 생성 방지 거리
+const DUPLICATE_DIST_PX = 38; 
 
 let customRadiusPx = parseInt(localStorage.getItem('anvil_radius_px')) || 12;
 
-// 슬라이더 조절 이벤트
 if (pxSlider) {
     pxSlider.value = customRadiusPx;
     if (pxValueText) pxValueText.innerText = customRadiusPx + 'px';
@@ -209,6 +208,10 @@ function captureBase() {
 
 function processFrame() {
     if (!isStreaming) return;
+    if (video.readyState !== 4 || video.paused || video.ended) {
+        requestAnimationFrame(processFrame);
+        return;
+    }
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
@@ -221,138 +224,149 @@ function processFrame() {
     }
 
     if (roi && isBaseCaptured) {
-        cropCanvas.width = roi.w;
-        cropCanvas.height = roi.h;
-        cropCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
-        let roiMat = cv.imread(cropCanvas);
+        let allocatedMats = [];
 
-        let currentRGB = new cv.Mat();
-        cv.cvtColor(roiMat, currentRGB, cv.COLOR_RGBA2RGB);
+        try {
+            cropCanvas.width = roi.w;
+            cropCanvas.height = roi.h;
+            cropCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
 
-        // 1. 프레임 차분
-        let diffRGB = new cv.Mat();
-        cv.absdiff(currentRGB, baseColorMat, diffRGB);
+            let roiMat = cv.imread(cropCanvas);
+            allocatedMats.push(roiMat);
 
-        let diffGray = new cv.Mat();
-        cv.cvtColor(diffRGB, diffGray, cv.COLOR_RGB2GRAY);
+            let currentRGB = new cv.Mat();
+            allocatedMats.push(currentRGB);
+            cv.cvtColor(roiMat, currentRGB, cv.COLOR_RGBA2RGB);
 
-        let threshMat = new cv.Mat();
-        cv.threshold(diffGray, threshMat, 35, 255, cv.THRESH_BINARY);
+            // 1. 프레임 차분
+            let diffRGB = new cv.Mat();
+            allocatedMats.push(diffRGB);
+            cv.absdiff(currentRGB, baseColorMat, diffRGB);
 
-        // 2. 채도 필터링
-        let currentHSV = new cv.Mat();
-        cv.cvtColor(currentRGB, currentHSV, cv.COLOR_RGB2HSV);
+            let diffGray = new cv.Mat();
+            allocatedMats.push(diffGray);
+            cv.cvtColor(diffRGB, diffGray, cv.COLOR_RGB2GRAY);
 
-        let hsvPlanes = new cv.MatVector();
-        cv.split(currentHSV, hsvPlanes);
-        let satMat = hsvPlanes.get(1);
+            let threshMat = new cv.Mat();
+            allocatedMats.push(threshMat);
+            cv.threshold(diffGray, threshMat, 35, 255, cv.THRESH_BINARY);
 
-        let satThreshMat = new cv.Mat();
-        cv.threshold(satMat, satThreshMat, 40, 255, cv.THRESH_BINARY);
+            // 2. 채도 필터링
+            let currentHSV = new cv.Mat();
+            allocatedMats.push(currentHSV);
+            cv.cvtColor(currentRGB, currentHSV, cv.COLOR_RGB2HSV);
 
-        let finalThreshMat = new cv.Mat();
-        cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
+            let hsvPlanes = new cv.MatVector();
+            allocatedMats.push(hsvPlanes);
+            cv.split(currentHSV, hsvPlanes);
 
-        let totalChangedPixels = cv.countNonZero(threshMat);
-        let changeRatio = totalChangedPixels / (roi.w * roi.h);
+            let satMat = hsvPlanes.get(1);
+            allocatedMats.push(satMat);
 
-        if (currentState === 'WAIT_CLOSE') {
-            ctx.strokeStyle = "#FF9800";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+            let satThreshMat = new cv.Mat();
+            allocatedMats.push(satThreshMat);
+            cv.threshold(satMat, satThreshMat, 40, 255, cv.THRESH_BINARY);
 
-            if (changeRatio > 0.40) {
-                currentState = 'WAIT_OPEN';
-                statusText.innerText = "제련을 시작하세요.";
-            }
-        } 
-        else if (currentState === 'WAIT_OPEN') {
-            ctx.strokeStyle = "#2196F3";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+            let finalThreshMat = new cv.Mat();
+            allocatedMats.push(finalThreshMat);
+            cv.bitwise_and(threshMat, satThreshMat, finalThreshMat);
 
-            if (changeRatio < 0.18) {
-                currentState = 'DETECTING';
-                detectingStartTime = Date.now();
-                resetStateData();
-                statusText.innerText = "순서 감지중";
-            }
-        } 
-        else if (currentState === 'DETECTING') {
-            ctx.strokeStyle = "#00E676";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+            let totalChangedPixels = cv.countNonZero(threshMat);
+            let changeRatio = totalChangedPixels / (roi.w * roi.h);
 
-            const now = Date.now();
+            if (currentState === 'WAIT_CLOSE') {
+                ctx.strokeStyle = "#FF9800";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-            if (changeRatio > 0.45) {
-                currentState = 'WAIT_OPEN';
-                resetStateData();
-                statusText.innerText = "다음 제련 대기 중";
-            } else if (!isLocked && (now - detectingStartTime >= 200)) {
-                let contours = new cv.MatVector();
-                let hierarchy = new cv.Mat();
-                cv.findContours(finalThreshMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+                if (changeRatio > 0.40) {
+                    currentState = 'WAIT_OPEN';
+                    statusText.innerText = "제련을 시작하세요.";
+                }
+            } 
+            else if (currentState === 'WAIT_OPEN') {
+                ctx.strokeStyle = "#2196F3";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-                let bestCandidate = null;
-                let maxArea = 0;
-                const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
+                if (changeRatio < 0.18) {
+                    currentState = 'DETECTING';
+                    detectingStartTime = Date.now();
+                    resetStateData();
+                    statusText.innerText = "순서 감지중";
+                }
+            } 
+            else if (currentState === 'DETECTING') {
+                ctx.strokeStyle = "#00E676";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
 
-                // 해당 프레임에서 가장 뚜렷하고 면적이 큰 이펙트 덩어리 단 1개만 추출
-                for (let i = 0; i < contours.size(); ++i) {
-                    let cnt = contours.get(i);
-                    let area = cv.contourArea(cnt);
+                const now = Date.now();
 
-                    if (area > 50 && area < 5000) {
-                        let M = cv.moments(cnt, true);
-                        if (M.m00 > 0) {
-                            let cx = Math.round(M.m10 / M.m00) + roi.x;
-                            let cy = Math.round(M.m01 / M.m00) + roi.y;
+                if (changeRatio > 0.45) {
+                    currentState = 'WAIT_OPEN';
+                    resetStateData();
+                    statusText.innerText = "다음 제련 대기 중";
+                } else if (!isLocked && (now - detectingStartTime >= 200)) {
+                    let contours = new cv.MatVector();
+                    let hierarchy = new cv.Mat();
+                    allocatedMats.push(contours, hierarchy);
 
-                            let isDuplicate = pinSequence.some(pin => {
-                                return Math.hypot(pin.x - cx, pin.y - cy) < DUPLICATE_DIST_PX;
-                            });
+                    cv.findContours(finalThreshMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-                            if (!isDuplicate && area > maxArea) {
-                                maxArea = area;
-                                bestCandidate = { x: cx, y: cy };
+                    let bestCandidate = null;
+                    let maxArea = 0;
+                    const isCooldownReady = !lastPinTimestamp || (now - lastPinTimestamp >= MIN_PIN_INTERVAL_MS);
+
+                    for (let i = 0; i < contours.size(); ++i) {
+                        let cnt = contours.get(i);
+                        let area = cv.contourArea(cnt);
+
+                        if (area > 50 && area < 5000) {
+                            let M = cv.moments(cnt, true);
+                            if (M.m00 > 0) {
+                                let cx = Math.round(M.m10 / M.m00) + roi.x;
+                                let cy = Math.round(M.m01 / M.m00) + roi.y;
+
+                                let isDuplicate = pinSequence.some(pin => {
+                                    return Math.hypot(pin.x - cx, pin.y - cy) < DUPLICATE_DIST_PX;
+                                });
+
+                                if (!isDuplicate && area > maxArea) {
+                                    maxArea = area;
+                                    bestCandidate = { x: cx, y: cy };
+                                }
                             }
                         }
                     }
-                }
 
-                contours.delete();
-                hierarchy.delete();
+                    if (bestCandidate && isCooldownReady && pinSequence.length < TOTAL_PINS) {
+                        pinSequence.push({
+                            num: pinSequence.length + 1,
+                            x: bestCandidate.x,
+                            y: bestCandidate.y
+                        });
+                        lastPinTimestamp = now;
+                        statusText.innerText = `${pinSequence.length}번 순서 확인`;
+                    }
 
-                if (bestCandidate && isCooldownReady && pinSequence.length < TOTAL_PINS) {
-                    pinSequence.push({
-                        num: pinSequence.length + 1,
-                        x: bestCandidate.x,
-                        y: bestCandidate.y
-                    });
-                    lastPinTimestamp = now;
-                    statusText.innerText = `${pinSequence.length}번 순서 확인`;
-                }
-
-                if (pinSequence.length > 0 && lastPinTimestamp) {
-                    if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2000)) {
-                        isLocked = true;
-                        statusText.innerText = `${pinSequence.length}개 순서확인.`;
+                    if (pinSequence.length > 0 && lastPinTimestamp) {
+                        if (pinSequence.length === TOTAL_PINS || (now - lastPinTimestamp >= 2000)) {
+                            isLocked = true;
+                            statusText.innerText = `${pinSequence.length}개 순서확인.`;
+                        }
                     }
                 }
             }
+        } catch (err) {
+            console.warn("Frame processing error bypassed:", err);
+        } finally {
+            allocatedMats.forEach(mat => {
+                if (mat && typeof mat.delete === 'function') {
+                    try { mat.delete(); } catch(e) {}
+                }
+            });
         }
-
-        finalThreshMat.delete();
-        satThreshMat.delete();
-        satMat.delete();
-        hsvPlanes.delete();
-        currentHSV.delete();
-        threshMat.delete();
-        diffGray.delete();
-        diffRGB.delete();
-        currentRGB.delete();
-        roiMat.delete();
     }
 
     drawDetections(pinSequence);
